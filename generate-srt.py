@@ -43,18 +43,19 @@ def transcribe_video(input_file, translate_to=None):
 
     # If the user wants English, we can use faster-whisper's built-in translate task.
     task = "translate" if translate_to == "en" else "transcribe"
-    segments, info = model.transcribe(input_file, beam_size=5, task=task, vad_filter=True)
+    all_segments, info = model.transcribe(input_file, beam_size=5, task=task, vad_filter=True)
+    all_segments = list(all_segments)
 
     print("Detected language '{}' with probability {:.2f}".format(info.language, info.language_probability))
 
-    texts = [segment.text for segment in segments]
+    texts = [segment.text for segment in all_segments]
     if translate_to and translate_to != "en":
         texts = _translate_segments(texts, translate_to)
 
     srt_filename = os.path.splitext(input_file)[0] + '.srt'
 
     with open(srt_filename, 'w', encoding='utf-8') as srt_file:
-        for segment, text in zip(segments, texts):
+        for segment, text in zip(all_segments, texts):
             start_time = format_time(segment.start)
             end_time = format_time(segment.end)
             segment_id = segment.id + 1
