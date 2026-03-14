@@ -254,11 +254,13 @@ def transcribe_video(
     max_translate_chars=350000,
     max_translate_calls=250,
     overwrite=True,
+    vad_filter=True,
 ):
     model_size = "medium"  # options: tiny, small, medium, large-v2
     model = WhisperModel(model_size, device="cpu", cpu_threads=12, compute_type="int8")
 
     print(f"Transcribing: {input_file}")
+    print(f"VAD filter: {vad_filter}")
     start_ts = time.time()
     spinner = ["|", "/", "-", "\\"]
     stop_flag = threading.Event()
@@ -279,7 +281,7 @@ def transcribe_video(
     prog_thread = threading.Thread(target=_show_progress)
     prog_thread.start()
 
-    all_segments, info = model.transcribe(input_file, beam_size=5, task="transcribe", vad_filter=True)
+    all_segments, info = model.transcribe(input_file, beam_size=5, task="transcribe", vad_filter=vad_filter)
     all_segments = list(all_segments)
 
     stop_flag.set()
@@ -399,6 +401,7 @@ def main():
     parser.add_argument("--max-duration", type=float, default=3600, help="Max media duration in seconds to process (skip longer files)")
     parser.add_argument("--continue-on-error", action="store_true", help="For scan mode, continue to next file when one fails")
     parser.add_argument("--no-overwrite", action="store_true", help="Do not overwrite existing SRT files")
+    parser.add_argument("--vad-filter", action="store_true", default=False, help="Enable VAD filtering in Whisper transcribe (default false for better coverage)")
     parser.add_argument(
         "--extensions",
         default=".mp4,.mkv,.avi,.mov,.flv,.webm,.mp3,.wav,.m4a",
@@ -443,6 +446,7 @@ def main():
                     max_translate_chars=args.max_translate_chars,
                     max_translate_calls=args.max_translate_calls,
                     overwrite=overwrite,
+                vad_filter=args.vad_filter,
                 )
                 print(f"\nDone: {path} -> {len(outputs)} output files")
                 successes.append(path)
@@ -478,6 +482,7 @@ def main():
             max_translate_chars=args.max_translate_chars,
             max_translate_calls=args.max_translate_calls,
             overwrite=overwrite,
+            vad_filter=args.vad_filter,
         )
 
 

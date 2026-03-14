@@ -44,6 +44,7 @@ python generate-srt.py "ToProcess\video.mp4" --languages en --translate-mode non
 > - `--translate-mode all` translates all segments.
 > - `--translate-mode non-target` keeps segments already in the target language (best-effort detection) and translates only other segments.
 > - During transcription, the script shows an in-place progress spinner and elapsed seconds.
+> - Default is `--vad-filter` off for broader coverage. Use `--vad-filter` to enable Whisper VAD filtering if you want fewer, more compact segments.
 
 ### 6) Scan entire library recursively and generate SRTs next to each file
 ```bash
