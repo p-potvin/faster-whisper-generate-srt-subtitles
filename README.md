@@ -1,4 +1,4 @@
-# faster-whisper-generate-srt-subtitles
+# video-transcriber-translator
 Generate subtitles (SRT) from an audio/video file. It uses the `faster-whisper` library, which is much faster than OpenAI's original Whisper implementation.
 
 It can also translate the generated subtitles into other languages.
