@@ -231,6 +231,49 @@ def get_media_duration_seconds(input_file):
         return None
 
 
+def extract_audio_to_wav(input_file, output_wav):
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_file,
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            output_wav,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def isolate_vocals_with_demucs(input_audio, output_dir, device="cpu"):
+    os.makedirs(output_dir, exist_ok=True)
+    cmd = ["demucs", "--two-stems=vocals", "-o", output_dir, input_audio]
+    if device == "cuda":
+        cmd.insert(1, "-d")
+        cmd.insert(2, "cuda")
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+    # Demucs writes outputs under output_dir/<model-name>/<file>/vocals.wav
+    vocals_path = None
+    for root, _, files in os.walk(output_dir):
+        for file in files:
+            if file.endswith("vocals.wav"):
+                vocals_path = os.path.join(root, file)
+                break
+        if vocals_path:
+            break
+    if not vocals_path:
+        raise RuntimeError("Voice isolation with Demucs did not produce vocals.wav")
+    return vocals_path
+
+
 def write_srt(output_path, segments, texts):
     with open(output_path, "w", encoding="utf-8") as output_file:
         for segment, text in zip(segments, texts):
