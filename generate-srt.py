@@ -1,9 +1,9 @@
 import argparse
 import os
 import time
-import video_transcriber_core as core
-import video_transcriber_media as media
-import video_transcriber_utils as utils
+import core
+import media
+import utils
 
 
 def main():
