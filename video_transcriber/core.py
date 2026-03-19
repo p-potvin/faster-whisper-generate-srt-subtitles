@@ -4,6 +4,15 @@ from faster_whisper import WhisperModel
 from video_transcriber import utils
 from video_transcriber import translation
 
+_WHISPER_MODEL = None
+
+
+def get_whisper_model():
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        _WHISPER_MODEL = WhisperModel("medium", device="cuda", compute_type="int8_float16")
+    return _WHISPER_MODEL
+
 def transcribe_video(
     input_file,
     output_file=None,
@@ -13,7 +22,7 @@ def transcribe_video(
     translate_mode="non-target",
     max_translate_chars=350000,
     max_translate_calls=250,
-    overwrite=True,
+    overwrite=False,
     vad_filter=True,
 ):
     # Validate input file
@@ -42,8 +51,7 @@ def transcribe_video(
             return []
 
     # --- Step 1: Transcribe ---
-    model_size = "medium"
-    model = WhisperModel(model_size, device="cuda", compute_type="int8_float16")
+    model = get_whisper_model()
 
     print(f"Transcribing: {input_file} (VAD filter: {vad_filter})")
     start_ts = time.time()
@@ -72,6 +80,8 @@ def transcribe_video(
             outputs_to_generate[path] = original_texts
 
     if languages:
+        source_lang = str(getattr(info, "language", "") or "").strip().lower()
+        source_lang_supported = translation.is_supported_language_code(source_lang, translate_api=translate_api)
         for lang_code in languages:
             lang_code = lang_code.strip().lower()
             if not lang_code or lang_code in ("orig", "original", "none"):
@@ -85,17 +95,26 @@ def transcribe_video(
             if is_target_lang_same_as_source and translate_mode != "all":
                 translated_texts = original_texts
             else:
+                if translate_mode != "all" and source_lang and not source_lang_supported:
+                    print(
+                        f"Skipping translation to {lang_code}: detected source language '{info.language}' is not supported by {translate_api}."
+                    )
+                    continue
                 print(f"Translating to {lang_code}...")
                 import asyncio
-                translated_texts = asyncio.run(translation.translate_segments(
-                    original_texts,
-                    target_lang=lang_code,
-                    translate_api=translate_api,
-                    translate_mode=translate_mode,
-                    max_chars=max_translate_chars,
-                    max_calls=max_translate_calls,
-                    detector=None
-                ))
+                try:
+                    translated_texts = asyncio.run(translation.translate_segments(
+                        original_texts,
+                        target_lang=lang_code,
+                        translate_api=translate_api,
+                        translate_mode=translate_mode,
+                        max_chars=max_translate_chars,
+                        max_calls=max_translate_calls,
+                        detector=None
+                    ))
+                except translation.UnsupportedLanguageError as exc:
+                    print(f"Skipping translation to {lang_code}: {exc}")
+                    continue
             
             outputs_to_generate[path] = translated_texts
     

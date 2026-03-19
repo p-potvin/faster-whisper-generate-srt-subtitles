@@ -5,13 +5,16 @@ def format_time(seconds):
     milliseconds = (seconds - int(seconds)) * 1000
     return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d},{int(milliseconds):03d}"
 
-def print_progress(current, total, prefix="", width=30):
+def print_progress(current, total, prefix="", width=30, same_line=True):
     ratio = current / total if total > 0 else 1
     filled = int(width * ratio)
     bar = "#" * filled + "-" * (width - filled)
-    print(f"\r{prefix} [{bar}] {current}/{total}\r", end="", flush=True)
-    if current >= total:
-        print("", flush=True)
+    line = f"{prefix} [{bar}] {current}/{total}"
+    if same_line:
+        end = "\n" if current >= total else ""
+        print(f"\r{line}", end=end, flush=True)
+    else:
+        print(line, flush=True)
 
 def write_srt(output_path, segments, texts):
     with open(output_path, "w", encoding="utf-8") as output_file:

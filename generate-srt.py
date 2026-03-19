@@ -14,7 +14,7 @@ def main():
     parser.add_argument("--output-file", help="Output SRT file (for single file only)")
     parser.add_argument(
         "--languages",
-        default="",
+        default="en",
         help="Comma-separated target language codes for translation (e.g. en,es,fr). Generates <video>.<lang>.srt.",
     )
     parser.add_argument("--skip-original", action="store_true", help="Do not generate original-language SRT")
@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--max-duration", type=float, default=3600, help="Max media duration in seconds to process (skip longer files)")
     parser.add_argument("--continue-on-error", action="store_true", help="For scan mode, continue to next file when one fails")
     parser.add_argument("--overwrite", action="store_true", dest="overwrite", default=False, help="Overwrite existing SRT files")
-    parser.add_argument("--no-vad-filter", action="store_true", dest="vad_filter", default=False, help="Disable VAD filtering for more accurate timestamps (default is enabled).")
+    parser.add_argument("--no-vad-filter", action="store_false", dest="vad_filter", default=True, help="Disable VAD filtering for more accurate timestamps (default is enabled).")
     parser.add_argument("--extensions", default=".mp4,.mkv,.avi,.mov,.flv,.webm,.mp3,.wav,.m4a", help="Comma-separated media extensions for scan mode",
     )
 
@@ -52,11 +52,11 @@ def main():
         failures = []
         start_time = time.time()
         for idx, path in enumerate(matched, start=1):
-            utils.print_progress(idx, len(matched), prefix="Scan progress")
+            utils.print_progress(idx, len(matched), prefix="Scan progress", same_line=False)
             if args.max_duration is not None:
                 duration = media.get_media_duration_seconds(path)
                 if duration is not None and duration > args.max_duration:
-                    print(f"\nSkipping (too long > {args.max_duration}s): {path} ({duration:.1f}s)")
+                    print(f"Skipping (too long > {args.max_duration}s): {path} ({duration:.1f}s)")
                     failures.append((path, f"duration {duration:.1f}s > max {args.max_duration}s"))
                     continue
 
@@ -73,16 +73,16 @@ def main():
                     overwrite=args.overwrite,
                     vad_filter=args.vad_filter,
                 )
-                print(f"\nDone: {path} -> {len(outputs)} output files")
+                print(f"Done: {path} -> {len(outputs)} output files")
                 successes.append(path)
             except Exception as exc:
-                print(f"\nFailed for {path}: {exc}")
+                print(f"Failed for {path}: {exc}")
                 failures.append((path, str(exc)))
                 if not args.continue_on_error:
                     break
 
         elapsed = time.time() - start_time
-        print("\nScan completed.")
+        print("Scan completed.")
         print(f"Success: {len(successes)} files")
         print(f"Failed: {len(failures)} files")
         if failures:
