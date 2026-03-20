@@ -3,6 +3,7 @@ import time
 from faster_whisper import WhisperModel
 from video_transcriber import utils
 from video_transcriber import translation
+from video_transcriber import media
 
 _WHISPER_MODEL = None
 
@@ -24,7 +25,7 @@ def transcribe_video(
     max_translate_calls=500,
     overwrite=False,
     vad_filter=True,
-    vad_threshold=0.35,
+    vad_threshold=None,
 ):
     # Validate input file
     if not os.path.isfile(input_file):
@@ -53,6 +54,25 @@ def transcribe_video(
 
     # --- Step 1: Transcribe ---
     model = get_whisper_model()
+
+    # Dynamic VAD threshold detection
+    if vad_filter:
+        if vad_threshold is None or vad_threshold == "auto" or vad_threshold == 0.0:
+            print(f"Analyzing audio volume for automatic VAD...")
+            vol_metrics = media.get_audio_volume_metrics(input_file)
+            mean_vol = vol_metrics.get("mean_volume", -25.0)
+            
+            # Simple heuristic: 
+            # - More silence/quieter means lower threshold to pick up faint sounds.
+            # - Base threshold of 0.35 for 'normal' levels around -20dB
+            # - If it's -40dB (very quiet), we want to lower threshold to capture it.
+            #   (e.g., threshold = 0.35 + (mean_vol + 20) * 0.01)
+            #   -20dB => 0.35
+            #   -40dB => 0.15 
+            #   -10dB => 0.45
+            
+            vad_threshold = max(0.15, min(0.5, 0.35 + (mean_vol + 20) * 0.01))
+            print(f"Mean volume: {mean_vol:.1f} dB -> Calculated auto-VAD threshold: {vad_threshold:.2f}")
 
     print(f"Transcribing: {input_file} (VAD filter: {vad_filter}, threshold: {vad_threshold})")
     start_ts = time.time()

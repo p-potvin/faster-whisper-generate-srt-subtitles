@@ -64,6 +64,40 @@ def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
         raise RuntimeError("Voice isolation with Demucs did not produce vocals.wav")
     return vocals_path
 
+
+def get_audio_volume_metrics(input_file):
+    import re
+    try:
+        # Use FFmpeg volumedetect filter
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-i",
+                input_file,
+                "-af",
+                "volumedetect",
+                "-vn",
+                "-sn",
+                "-dn",
+                "-f",
+                "null",
+                "NUL", # Windows null device
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = result.stderr
+        mean_vol = re.search(r"mean_volume: ([\-\d\.]+) dB", output)
+        max_vol = re.search(r"max_volume: ([\-\d\.]+) dB", output)
+        
+        return {
+            "mean_volume": float(mean_vol.group(1)) if mean_vol else -25.0,
+            "max_volume": float(max_vol.group(1)) if max_vol else 0.0
+        }
+    except Exception:
+        return {"mean_volume": -25.0, "max_volume": 0.0}
+
 def find_media_files(root_dir, extensions):
     ext_set = {ext.lower() for ext in extensions}
     for dirpath, _, files in os.walk(root_dir):
