@@ -1,5 +1,2 @@
 to_process
-video_transcriber/__pycache__/
-video_transcriber/__pycache__/core.cpython-314.pyc
-video_transcriber/__pycache__/translation.cpython-314.pyc
-video_transcriber/__pycache__/utils.cpython-314.pyc
+*.pyc

@@ -25,9 +25,9 @@ def main():
         default="non-target",
         help="all: translate all segments; non-target: only translate where detected src != target",
     )
-    parser.add_argument("--max-translate-chars", type=int, default=350000, help="Max total chars per video before translation is skipped")
-    parser.add_argument("--max-translate-calls", type=int, default=250, help="Max translator calls per video")
-    parser.add_argument("--max-duration", type=float, default=3600, help="Max media duration in seconds to process (skip longer files)")
+    parser.add_argument("--max-translate-chars", type=int, default=1000000, help="Max total chars per video before translation is skipped")
+    parser.add_argument("--max-translate-calls", type=int, default=500, help="Max translator calls per video")
+    parser.add_argument("--max-duration", type=float, default=7200, help="Max media duration in seconds to process (skip longer files)")
     parser.add_argument("--continue-on-error", action="store_true", help="For scan mode, continue to next file when one fails")
     parser.add_argument("--overwrite", action="store_true", dest="overwrite", default=False, help="Overwrite existing SRT files")
     parser.add_argument("--no-vad-filter", action="store_false", dest="vad_filter", default=True, help="Disable VAD filtering for more accurate timestamps (default is enabled).")

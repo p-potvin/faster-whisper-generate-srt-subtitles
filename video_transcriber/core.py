@@ -21,7 +21,7 @@ def transcribe_video(
     translate_api="deep-translator",
     translate_mode="non-target",
     max_translate_chars=350000,
-    max_translate_calls=250,
+    max_translate_calls=500,
     overwrite=False,
     vad_filter=True,
 ):
@@ -114,6 +114,9 @@ def transcribe_video(
                     ))
                 except translation.UnsupportedLanguageError as exc:
                     print(f"Skipping translation to {lang_code}: {exc}")
+                    continue
+                except Exception as exc:
+                    print(f"Exception translating to {lang_code}: {exc}")
                     continue
             
             outputs_to_generate[path] = translated_texts
