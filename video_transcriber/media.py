@@ -23,7 +23,7 @@ def get_media_duration_seconds(input_file):
         return None
 
 
-def extract_audio_to_wav(input_file, output_wav, volume_boost_db=0.0):
+def extract_audio_to_wav(input_file, output_wav, normalize=False):
     cmd = [
         "ffmpeg",
         "-y",
@@ -34,8 +34,10 @@ def extract_audio_to_wav(input_file, output_wav, volume_boost_db=0.0):
         "-ac",
         "1",
     ]
-    if volume_boost_db > 0.0:
-        cmd.extend(["-af", f"volume={volume_boost_db}dB"])
+    if normalize:
+        # Use Dynamic Audio Normalizer (dynaudnorm) or EBU R128 (loudnorm).
+        # loudnorm is superb at making speech consistently audible without clipping.
+        cmd.extend(["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"])
     
     cmd.extend([
         "-c:a",

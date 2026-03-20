@@ -27,6 +27,7 @@ def transcribe_video(
     overwrite=False,
     vad_filter=True,
     vad_threshold=None,
+    normalize_audio=True,
 ):
     # Validate input file
     if not os.path.isfile(input_file):
@@ -64,23 +65,21 @@ def transcribe_video(
         vol_metrics = media.get_audio_volume_metrics(input_file)
         mean_vol = vol_metrics.get("mean_volume", -25.0)
         
-        # Boost volume if it's too quiet (target -18 dB)
-        if mean_vol < -22.0:
-            boost_db = -18.0 - mean_vol
-            print(f"Low volume detected (Mean: {mean_vol:.1f} dB). Boosting audio by {boost_db:.1f} dB...")
+        # Apply loudness normalization for all audio to ensure consistent speech-to-noise ratio
+        if normalize_audio:
+            print(f"Applying dynamic loudness normalization (Original Mean Vol: {mean_vol:.1f} dB)...")
             temp_fd, temp_path = tempfile.mkstemp(suffix=".wav")
             os.close(temp_fd)
             temp_audio_file = temp_path
-            media.extract_audio_to_wav(input_file, temp_audio_file, volume_boost_db=boost_db)
+            media.extract_audio_to_wav(input_file, temp_audio_file, normalize=True)
             transcription_file = temp_audio_file
-            # Once boosted, our effective mean volume is around -18.0.
-            mean_vol = -18.0
+            # Once normalized, audio levels are ideal (loudnorm targets ~ -16 LUFS)
+            mean_vol = -16.0
 
         if vad_filter:
             if vad_threshold is None or vad_threshold == "auto" or vad_threshold == 0.0:
-                # Simple heuristic: 
-                # - Base threshold of 0.35 for 'normal' levels around -20dB
-                vad_threshold = max(0.15, min(0.5, 0.35 + (mean_vol + 20) * 0.01))
+                # With normalized audio, the standard threshold of ~0.35 works perfectly.
+                vad_threshold = max(0.15, min(0.35, 0.35 + (mean_vol + 16) * 0.01))
                 print(f"Calculated auto-VAD threshold: {vad_threshold:.2f}")
 
         print(f"Transcribing: {input_file} (VAD filter: {vad_filter}, threshold: {vad_threshold})")

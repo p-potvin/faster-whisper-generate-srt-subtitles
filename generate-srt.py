@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--overwrite", action="store_true", dest="overwrite", default=False, help="Overwrite existing SRT files")
     parser.add_argument("--no-vad-filter", action="store_false", dest="vad_filter", default=True, help="Disable VAD filtering for more accurate timestamps (default is enabled).")
     parser.add_argument("--vad-threshold", type=float, default=0.0, help="VAD threshold (0-1). Set to 0.0 for automatic detection based on volume levels (recommended).")
+    parser.add_argument("--no-normalize", dest="normalize_audio", action="store_false", default=True, help="Disable applying dynamic loudness normalization to the audio before processing.")
     parser.add_argument("--extensions", default=".mp4,.mkv,.avi,.mov,.flv,.webm,.mp3,.wav,.m4a", help="Comma-separated media extensions for scan mode",
     )
 
@@ -84,6 +85,7 @@ def main():
                     overwrite=args.overwrite,
                     vad_filter=args.vad_filter,
                     vad_threshold=args.vad_threshold,
+                    normalize_audio=args.normalize_audio,
                 )
                 print(f"Done: {path} -> {len(outputs)} output files")
                 successes.append(path)
@@ -115,6 +117,7 @@ def main():
             overwrite=args.overwrite,
             vad_filter=args.vad_filter,
             vad_threshold=args.vad_threshold,
+            normalize_audio=args.normalize_audio,
         )
 
 
