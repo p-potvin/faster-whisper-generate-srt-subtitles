@@ -1,5 +1,6 @@
 import os
 import subprocess
+import shlex
 
 def get_media_duration_seconds(input_file):
     try:
@@ -12,7 +13,7 @@ def get_media_duration_seconds(input_file):
                 "format=duration",
                 "-of",
                 "default=noprint_wrappers=1:nokey=1",
-                input_file,
+                os.path.abspath(input_file),
             ],
             capture_output=True,
             text=True,
@@ -23,12 +24,13 @@ def get_media_duration_seconds(input_file):
         return None
 
 
-def extract_audio_to_wav(input_file, output_wav, normalize=False):
+def extract_audio_to_wav(input_file, output_wav, normalize=True):
+    # Improvement: Default to normalize=True for consistent volume
     cmd = [
         "ffmpeg",
         "-y",
         "-i",
-        input_file,
+        os.path.abspath(input_file),
         "-ar",
         "16000",
         "-ac",
@@ -42,7 +44,7 @@ def extract_audio_to_wav(input_file, output_wav, normalize=False):
     cmd.extend([
         "-c:a",
         "pcm_s16le",
-        output_wav,
+        os.path.abspath(output_wav),
     ])
     
     subprocess.run(
@@ -56,9 +58,11 @@ def extract_audio_to_wav(input_file, output_wav, normalize=False):
 def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
     import sys
     os.makedirs(output_dir, exist_ok=True)
+    input_audio_abs = os.path.abspath(input_audio)
+    output_dir_abs = os.path.abspath(output_dir)
     
     # Revert to WAV because Demucs MP3 encoding is creating silent files
-    cmd = [sys.executable, "-m", "demucs.separate", "--two-stems=vocals", "-o", output_dir, input_audio]
+    cmd = [sys.executable, "-m", "demucs.separate", "--two-stems=vocals", "-o", output_dir_abs, input_audio_abs]
     if device == "cuda":
         cmd.insert(3, "-d")
         cmd.insert(4, "cuda")
@@ -81,7 +85,7 @@ def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
             raise RuntimeError(f"Demucs failed. Error:\n{stderr_out}")
     except FileNotFoundError:
         # Fallback if python module is not working
-        cmd = ["demucs", "--two-stems=vocals", "-o", output_dir, input_audio]
+        cmd = ["demucs", "--two-stems=vocals", "-o", output_dir_abs, input_audio_abs]
         if device == "cuda":
             cmd.insert(1, "-d")
             cmd.insert(2, "cuda")
@@ -91,7 +95,7 @@ def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
             raise RuntimeError(f"Demucs CLI failed. Error:\n{e3.stderr}")
 
     vocals_path = None
-    for root, _, files in os.walk(output_dir):
+    for root, _, files in os.walk(output_dir_abs):
         for file in files:
             if file == "vocals.wav":
                 vocals_path = os.path.join(root, file)
@@ -107,9 +111,9 @@ def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
     try:
         subprocess.run(
             [
-                "ffmpeg", "-y", "-i", vocals_path, 
+                "ffmpeg", "-y", "-i", os.path.abspath(vocals_path), 
                 "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", 
-                "-c:a", "pcm_s16le", normalized_path
+                "-c:a", "pcm_s16le", os.path.abspath(normalized_path)
             ],
             check=True, capture_output=True, text=True
         )
@@ -122,12 +126,13 @@ def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
 def get_audio_volume_metrics(input_file):
     import re
     try:
+        input_file_abs = os.path.abspath(input_file)
         # Use FFmpeg volumedetect filter
         result = subprocess.run(
             [
                 "ffmpeg",
                 "-i",
-                input_file,
+                input_file_abs,
                 "-af",
                 "volumedetect",
                 "-vn",

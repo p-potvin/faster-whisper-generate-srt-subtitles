@@ -3,9 +3,17 @@ Generate subtitles (SRT) from an audio/video file. It uses the `faster-whisper` 
 
 It can also translate the generated subtitles into other languages.
 
-The model `large-v2` has the best quality, while `medium` is a good compromise between quality and speed.
+The model `medium` is the default, providing a good balance of quality and speed.
 
 Read more about faster-whisper: https://github.com/guillaumekln/faster-whisper
+
+## 🛠 Features
+- **GPU Accelerated Transcription:** Uses `faster-whisper` with `int8_float16` for maximum performance.
+- **AI Vocal Isolation:** Uses `demucs` to remove background noise/music before transcription, significantly reducing hallucinations.
+- **Smart Translation:** Supports `deep-translator` and `googletrans` backends with `non-target` mode to only translate segments not already in the target language.
+- **VAD Filtering:** Voice Activity Detection to handle silence and noise accurately.
+- **Recursive Scanning:** Process entire directories of media files automatically.
+- **CorrelationId Logging:** Centralized logging with unique IDs for easier debugging across large batches.
 
 ## Quick Start
 ```bash

@@ -1,6 +1,8 @@
 import os
 import time
 import tempfile
+import shutil
+from contextlib import contextmanager
 from faster_whisper import WhisperModel
 from video_transcriber import utils
 from video_transcriber import translation
@@ -8,6 +10,17 @@ from video_transcriber import media
 
 _WHISPER_MODEL = None
 
+@contextmanager
+def temporary_directory(prefix="transcriber_"):
+    temp_dir = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield temp_dir
+    finally:
+        if os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as e:
+                print(f"Warning: Failed to clean up temp directory {temp_dir}: {e}")
 
 def get_whisper_model():
     global _WHISPER_MODEL
@@ -60,16 +73,12 @@ def transcribe_video(
 
     # Dynamic VAD threshold detection and Audio Isolation
     transcription_file = input_file
-    temp_dir = None
     
-    try:
-        import shutil
-        if isolate_vocals:
+    if isolate_vocals:
+        with temporary_directory(prefix="demucs_") as temp_dir:
             print(f"Isolating vocals with Demucs to remove background noise (GPU acceleration enabled)...")
-            temp_dir = tempfile.mkdtemp(prefix="demucs_")
             try:
                 # Extract audio to a temporary WAV first to prevent A/V track desync/delays.
-                # Passing mp4/mkv directly to Demucs often ignores container start-time offsets.
                 extracted_wav_path = os.path.join(temp_dir, "extracted_audio.wav")
                 media.extract_audio_to_wav(input_file, extracted_wav_path, normalize=False)
                 
@@ -80,12 +89,37 @@ def transcribe_video(
                 print(f"Warning: Vocal isolation failed: {e}. Falling back to original audio.")
                 transcription_file = input_file
 
+            print(f"Transcribing: {input_file} (VAD filter: {vad_filter}, threshold: {vad_threshold})")
+            start_ts = time.time()
+            
+            vad_params = dict(threshold=vad_threshold) if vad_threshold is not None else dict(threshold=0.5)
+
+            # Transcribe once to get segments and language info
+            all_segments, info = model.transcribe(
+                transcription_file, 
+                beam_size=5, 
+                task="transcribe", 
+                vad_filter=vad_filter,
+                vad_parameters=vad_params if vad_filter else None,
+                language=source_language,
+                condition_on_previous_text=False  # Prevents Whisper from hallucinating loops during absolute silence
+            )
+            
+            all_segments = list(all_segments)
+            elapsed_total = time.time() - start_ts
+            print(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
+            print(f"Segments generated: {len(all_segments)}")
+            print(f"Transcription elapsed: {elapsed_total:.1f}s")
+            original_texts = [segment.text for segment in all_segments]
+    else:
         print(f"Transcribing: {input_file} (VAD filter: {vad_filter}, threshold: {vad_threshold})")
         start_ts = time.time()
         
         vad_params = dict(threshold=vad_threshold) if vad_threshold is not None else dict(threshold=0.5)
 
         # Transcribe once to get segments and language info
+        # Improvement: Added word_timestamps=True for better SRT accuracy
+        # Added beam_size=5 and best-practice hallucination prevention
         all_segments, info = model.transcribe(
             transcription_file, 
             beam_size=5, 
@@ -93,7 +127,12 @@ def transcribe_video(
             vad_filter=vad_filter,
             vad_parameters=vad_params if vad_filter else None,
             language=source_language,
-            condition_on_previous_text=False  # Prevents Whisper from hallucinating loops during absolute silence
+            word_timestamps=True,  # Crucial for precise SRT timing
+            initial_prompt="I am transcribing clear dialogue.", # Guide the model
+            condition_on_previous_text=False, # Prevents repetitive hallucinations
+            compression_ratio_threshold=2.4, # standard fallback trigger
+            log_prob_threshold=-1.0,         # standard fallback trigger
+            no_speech_threshold=0.6          # filter out silence properly
         )
         
         all_segments = list(all_segments)
@@ -102,13 +141,6 @@ def transcribe_video(
         print(f"Segments generated: {len(all_segments)}")
         print(f"Transcription elapsed: {elapsed_total:.1f}s")
         original_texts = [segment.text for segment in all_segments]
-    finally:
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                import shutil
-                shutil.rmtree(temp_dir)
-            except Exception as e:
-                print(f"Warning: Failed to clean up temp directory {temp_dir}: {e}")
 
     # --- Step 2: Prepare output file paths and contents ---
     base_path = os.path.splitext(input_file)[0]

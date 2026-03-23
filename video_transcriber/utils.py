@@ -1,3 +1,43 @@
+import logging
+import uuid
+import sys
+
+_LOGGER = None
+_CORRELATION_ID = None
+
+def get_logger():
+    global _LOGGER
+    if _LOGGER is None:
+        # We need a custom filter to handle the 'correlation_id' extra field if it's missing in some logs
+        class CorrelationFilter(logging.Filter):
+            def filter(self, record):
+                if not hasattr(record, 'correlation_id'):
+                    record.correlation_id = _CORRELATION_ID or 'N/A'
+                return True
+
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] [%(correlation_id)s] %(message)s'))
+        
+        _LOGGER = logging.getLogger("video_transcriber")
+        _LOGGER.setLevel(logging.INFO)
+        _LOGGER.addHandler(handler)
+        _LOGGER.addFilter(CorrelationFilter())
+        _LOGGER.propagate = False # Avoid double logging if root logger is also configured
+    return _LOGGER
+
+def set_correlation_id(cid=None):
+    global _CORRELATION_ID
+    _CORRELATION_ID = cid or str(uuid.uuid4())
+
+def log_info(msg):
+    get_logger().info(msg)
+
+def log_error(msg):
+    get_logger().error(msg)
+
+def log_warning(msg):
+    get_logger().warning(msg)
+
 
 def format_time(seconds):
     minutes, seconds = divmod(seconds, 60)

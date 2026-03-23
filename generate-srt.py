@@ -8,6 +8,8 @@ from video_transcriber import media
 
 
 def main():
+    utils.set_correlation_id()
+    utils.log_info("Starting video transcriber-translator")
     parser = argparse.ArgumentParser(description="Generate SRT for one video or scan a folder recursively.")
     parser.add_argument("input_file", nargs="?", help="Video/audio file path (if not scanning a folder)")
     parser.add_argument("--scan-dir", help="If set, recursively process all supported media files under this directory")
