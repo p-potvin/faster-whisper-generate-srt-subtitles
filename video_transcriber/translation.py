@@ -81,12 +81,12 @@ async def translate_segments(
             # Use tqdm to show translation progress
             from tqdm import tqdm
             translated_texts = list(texts)
-            for progress_idx, idx in enumerate(tqdm(non_empty_indices, desc=f"Translating to {target_lang}", unit="segment", colour="green")):
+            for idx in enumerate(tqdm(non_empty_indices, desc=f"Translating to {target_lang}", unit="segment", colour="green")):
                 if calls > max_calls: 
                     raise RuntimeError("Translation request limit reached.")
                 
                 text = texts[idx]
-                tqdm.write(f"Processing segment {idx}: '{text[:50]}...'")
+                tqdm.write(f"Processing segment {idx}: '{text}'")
                 detection = detector.detect(text)
                 if inspect.isawaitable(detection):
                     detection = await detection
@@ -97,21 +97,8 @@ async def translate_segments(
                 if detected_lang != target_lang_simple:                    
                     if not is_supported_language_code(detected_lang, translate_api=translate_api):
                         detected_lang = target_lang_simple
-                        # Some detections might be garbage; we could skip or fail. 
-                        # Instructions say "Security First", but for translation, 
-                        # skipping might be better than failing the whole file.
-                        # However, to maintain current behavior:
-                        """raise UnsupportedLanguageError(
-                            f"Detected unsupported source language '{detected_lang}' for translation."
-                        )"""
-                    
-                    if calls > max_calls: 
-                        raise RuntimeError("Translation request limit reached.")
                     
                     try:
-                        # Jittered delay to avoid rate limiting and allow background processing
-                        #time.sleep(random.uniform(0.1, 0.2))
-                        #result = GoogleTranslator(source=detected_lang, target=target_lang).translate(text)
                         result = GoogleTranslator(target=target_lang).translate(text)
                         if isinstance(result, str):
                             translated_texts[idx] = result
@@ -134,7 +121,7 @@ async def translate_segments(
                 translated_texts.append(text)
                 continue
             
-            tqdm.write(f"Translating segment {i}: '{text[:50]}...'")
+            tqdm.write(f"Translating segment {i}: '{text}'")
             # Jittered delay to avoid rate limiting
             #time.sleep(random.uniform(0.1, 0.2))
             result = GoogleTranslator(source="auto", target=target_lang).translate(text)

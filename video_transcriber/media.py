@@ -1,6 +1,5 @@
 import os
 import subprocess
-import shlex
 
 def get_media_duration_seconds(input_file):
     try:
@@ -54,7 +53,6 @@ def extract_audio_to_wav(input_file, output_wav, normalize=True):
         check=True,
     )
 
-
 def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
     import sys
     os.makedirs(output_dir, exist_ok=True)
@@ -66,8 +64,6 @@ def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
         cmd.insert(3, "-d")
         cmd.insert(4, "cuda")
     
-    print(f"Running Demucs cmd: {' '.join(shlex.quote(arg) for arg in cmd)}")
-    print(f"Running vocal isolation on {input_audio}...")
     import subprocess
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
@@ -100,10 +96,11 @@ def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
 
     vocals_path = None
     for root, _, files in os.walk(output_dir_abs):
-        for file in files:
+        for file in files:            
             if file == "vocals.wav":
-                vocals_path = os.path.join(root, file)
+                vocals_path = os.path.join(root, file) 
                 break
+
         if vocals_path:
             break
     if not vocals_path:
@@ -111,9 +108,7 @@ def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
         
     # Create normalized path in the same directory as the input_audio to avoid 
     # nested Demucs structure issues and ensure cleanup works as expected.
-    normalized_path = os.path.join(os.path.dirname(input_audio_abs), os.path.splitext(os.path.basename(input_audio))[0] + "_vocals_norm.wav")
-    print(f"{vocals_path} isolated, normalizing to {normalized_path}")
-
+    normalized_path = os.path.join(os.path.dirname(input_audio), os.path.splitext(os.path.basename(input_audio))[0] + "_vocals_norm.wav")
     try:
         subprocess.run(
             [

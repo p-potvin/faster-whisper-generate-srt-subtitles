@@ -2,12 +2,13 @@ import argparse
 import os
 import sys
 import time
-from video_transcriber import core
-from video_transcriber import utils
-from video_transcriber import media
-
 
 def main():
+    # Only import heavy dependencies inside main() to speed up interpreter exit/error paths
+    from video_transcriber import core
+    from video_transcriber import utils
+    from video_transcriber import media
+
     utils.set_correlation_id()
     utils.log_info("Starting video transcriber-translator")
     parser = argparse.ArgumentParser(description="Generate SRT for one video or scan a folder recursively.")

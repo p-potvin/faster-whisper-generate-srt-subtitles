@@ -1,9 +1,42 @@
 import logging
 import uuid
 import sys
+from contextlib import contextmanager
+
+import threading
+import time
 
 _LOGGER = None
 _CORRELATION_ID = None
+
+@contextmanager
+def spinning_cursor(msg="Processing..."):
+    """
+    Shows a spinning cursor in the console while a long-running task is executing.
+    Usage: with spinning_cursor("Loading model..."):
+               do_something()
+    """
+    spinner = ["|", "/", "-", "\\"]
+    stop_spinner = False
+
+    def spin():
+        i = 0
+        while not stop_spinner:
+            sys.stdout.write(f"\r{spinner[i % len(spinner)]} {msg}")
+            sys.stdout.flush()
+            time.sleep(0.1)
+            i += 1
+        # Clear the spinner line when done
+        sys.stdout.write("\r" + " " * (len(msg) + 5) + "\r")
+        sys.stdout.flush()
+
+    thread = threading.Thread(target=spin)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop_spinner = True
+        thread.join()
 
 def get_logger():
     global _LOGGER
