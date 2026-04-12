@@ -25,14 +25,6 @@ def temporary_directory(prefix = "transcriber_"):
             except Exception as e:
                 print(f"Warning: Failed to clean up temp directory {temp_dir}: {e}")
 
-@Halo(text='Loading Whisper Model...', color='blue', spinner='star')
-def get_whisper_model():
-    global _WHISPER_MODEL
-    if _WHISPER_MODEL is None:
-        from faster_whisper import WhisperModel
-        _WHISPER_MODEL = WhisperModel("large-v3-turbo", device = "cuda", compute_type = "float16")
-    return _WHISPER_MODEL
-
 @Halo(text='Loading Parakeet Model...', color='cyan', spinner='star')
 def get_parakeet_model():
     global _PARAKEET_MODEL
@@ -66,8 +58,7 @@ def transcribe_video(
     max_translate_chars = 350000,
     max_translate_calls = 500,
     overwrite = False,
-    source_language = ["en"],
-    engine = "whisper"
+    source_language = None,
 ):
     start_total = time.time()
     # Validate input file
@@ -81,6 +72,16 @@ def transcribe_video(
     if not overwrite and media.srt_files_exist(input_file, output_file, languages, skip_original):
         return []
 
+    # --- Vocal Isolation and Transcription with Parakeet ---
+    # Parakeet-TDT produces word-level timestamps so segment boundaries are
+    # derived from actual voice pauses (gaps between recognised words).
+    # Background noise that is not decoded as speech can never delay a segment
+    # end — fixing the Silero-VAD issue where any sound above silence prevented
+    # the current segment from closing.
+    model = get_parakeet_model()
+    all_segments = list()
+    original_texts = []
+    outputs_to_generate = {}
     # --- Vocal Isolation, Segmentation, Normalization and Transcription ---
     all_segments = list()
     original_texts = []
@@ -103,101 +104,21 @@ def transcribe_video(
         else:
             transcription_file = get_isolated_vocals(input_file, temp_dir = temp_dir)
 
-        print(f"--- Step 2: Transcribing Isolated Vocals ({engine}) ---")
-        #with Halo(text="Transcribing with Whisper, using Silero VAD...", color="green", spinner="dots"):
+        print(f"--- Step 2: Transcribing Isolated Vocals (Parakeet-TDT) ---")
         print(transcription_file)
-        
-        if engine == "parakeet":
-            # Parakeet/Canary logic
-            model = get_parakeet_model()
-            
-            # Since Parakeet often takes raw audio or files, but our current wrapper
-            # takes a numpy array via 'transcribe', we need to load the audio.
-            # However, for efficiency, let's assume we want to process it in chunks
-            # based on VAD, just like Whisper.
-            
-            # We can use faster-whisper's WhisperModel JUST for VAD if we want,
-            # or use a dedicated VAD tool.
-            # To keep it simple and consistent with the existing structure:
-            whisper_for_vad = get_whisper_model()
-            segments_generator, info = whisper_for_vad.transcribe(
-                transcription_file,
-                beam_size = 5,
-                task = "transcribe",
-                vad_filter = True,
-                vad_parameters = vad_parameters,
-                multilingual = True,
-                condition_on_previous_text = False,
-                word_timestamps = True
-            )
-            
-            whisper_segments = list(segments_generator)
-            
-            # Now we use Parakeet to re-transcribe each VAD segment for better quality
-            import librosa
-            audio_data, _ = librosa.load(transcription_file, sr=16000)
-            
-            all_segments = []
-            for ws in tqdm(whisper_segments, desc="Parakeet Transcribing"):
-                # Extract chunk
-                start_sample = int(ws.start * 16000)
-                end_sample = int(ws.end * 16000)
-                chunk = audio_data[start_sample:end_sample]
-                
-                # Transcribe with Parakeet
-                # We use info.language if it's one of the supported ones (en, de, es, fr)
-                # or default to "en" to avoid None/Mismatch errors in multitask model
-                canary_langs = ["en", "de", "es", "fr"]
-                lang = info.language if (info and info.language in canary_langs) else "en"
-                
-                text = model.transcribe(chunk, source_lang=lang, target_lang=lang)
-                
-                # Format to match Segment protocol
-                from types import SimpleNamespace
-                # We reuse the whisper segment structure but with Parakeet's improved text
-                seg = SimpleNamespace(
-                    id=len(all_segments),
-                    start=ws.start,
-                    end=ws.end,
-                    text=text.strip(),
-                    words=None,
-                    language=lang
-                )
-                all_segments.append(seg)
-                original_texts.append(text.strip())
-        else:
-            # Default Whisper logic
-            model = get_whisper_model()
-            segments_generator, info = model.transcribe(
-                transcription_file, 
-                beam_size = 5, 
-                task = "transcribe", 
-                vad_filter = True, 
-                vad_parameters = vad_parameters,
-                multilingual = True,
-                condition_on_previous_text = False,
-                word_timestamps = True
-            )
+        all_segments = model.transcribe_file(
+            transcription_file,
+            language=source_language or "en",
+        )
 
-            all_segments = list(segments_generator)
-            
-        # Add a filter to reduce hallucinations
-        all_segments = [
-            s for s in segments_generator 
-            if s.no_speech_prob < 0.6 and s.avg_logprob > -1.0
-        ]
+    audio_duration = media.get_audio_duration_seconds(input_file) or 0.0
 
     if all_segments:
         print(f"First segment starts at: {all_segments[0].start:.2f}s and ends at {all_segments[0].end:.2f}s.")
 
-    # Remove global language assignment to allow per-segment language detection in translation.py
-    # for segment in all_segments:
-    #     if not hasattr(segment, 'language'):
-    #         segment.language = info.language
-    
     original_texts = [segment.text for segment in all_segments]
 
-    print(f"Segments generated: {len(original_texts)}. Total duration: {info.duration:.2f}s.")
+    print(f"Segments generated: {len(original_texts)}. Total duration: {audio_duration:.2f}s.")
     
     base_path = os.path.splitext(input_file)[0]
     output_base = os.path.splitext(output_file)[0] if output_file else base_path
