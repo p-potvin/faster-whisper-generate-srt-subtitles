@@ -70,15 +70,23 @@ class ParakeetWorker:
                 # (Optimization: use NeMo's Streaming ASR buffers for V2)
                 
                 # Note: Parakeet-TDT (v3) is significantly faster for this.
+                # Canary-1B MultiTask ASR requires task and language settings
+                # We also provide 'pnc' (punctuation and capitalization) as a literal string
                 results = self.model.transcribe(
                     [audio_data], 
                     batch_size=1,
+                    task="asr",
+                    pnc="yes",
+                    source_lang=source_lang,
+                    target_lang=target_lang,
                     verbose=False
                 )
                 
-                if results and len(results) > 0:
-                    return results[0].text if hasattr(results[0], 'text') else str(results[0])
-                return ""
+                # Check for list or raw result
+                if isinstance(results, list) and len(results) > 0:
+                    res = results[0]
+                    return res if isinstance(res, str) else (res.text if hasattr(res, 'text') else str(res))
+                return str(results) if results else ""
                 
         except Exception as e:
             self.logger.error(f"Parakeet transcription error: {e}")

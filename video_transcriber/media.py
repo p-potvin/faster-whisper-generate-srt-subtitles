@@ -64,7 +64,20 @@ def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
     input_audio_abs = os.path.abspath(input_audio)
     output_dir_abs = os.path.abspath(output_dir)
     
-    cmd = [sys.executable, "-m", "demucs.separate", "--two-stems=vocals", "-o", output_dir_abs, input_audio_abs]
+    # htdemucs is the latest and fastest model.
+    # --shifts=0: Disables equivariant stabilization (which usually takes 10x longer) for speed.
+    # --overlap=0.1: Minimum overlap to avoid artifacts but maximize speed.
+    # --segment=10: Smaller segments can be processed faster on some GPUs.
+    # --two-stems=vocals: Only extracts vocals, avoiding processing other stems.
+    cmd = [
+        sys.executable, "-m", "demucs.separate",
+        "-n", "htdemucs", # Use Hybrid Transformer Demucs (fastest)
+        "--two-stems=vocals",
+        "--shifts=0", # SIGNIFICANT SPEEDUP: avoid random shifts
+        "--overlap=0.1", # Lower overlap for faster processing
+        "-o", output_dir_abs,
+        input_audio_abs
+    ]
     if device == "cuda":
         cmd.insert(3, "-d")
         cmd.insert(4, "cuda")
