@@ -1,9 +1,11 @@
 # 🛡️ VaultWares Enterprise-wide Guidelines for Programming Projects
 
 - **What is VaultWares?**
-VaultWares is a premium SaaS and e-commerce platform built with a "Privacy-First" philosophy that aims to educate and protect its users. It leverages a modern, type-safe stack to deliver a seamless experience while shopping for high-value digital services and physical goods. It handles a vast array of projects in many different spheres that all have a common goal: data-privacy. It is very important to educate and spread awareness about the impact of data-tracking in our society.
+VaultWares builds consumer-facing tools where **individuals' privacy** comes first. We design products so people can use them without being tracked, profiled, or pressured into sharing more than they intended. **Security is a close second**: we use strong engineering to protect privacy and prevent misuse. **Functionality is our third pillar**: the product should stay genuinely useful and approachable for non-technical people.
 
-These are general guidelines to apply when coding under the VaultWares umbrella. Use common sense to determine what applies to your project. Prioritize security, performance, and scalability in that order. Always follow best practices for the specific language and framework you are using, but when in doubt, refer to these guidelines.
+Privacy and security often get bundled together, but they are not the same thing. **Privacy** is about what we collect, what we keep, and what we share. **Security** is about how we protect what exists. A product can be secure and still be invasive. Bad actors can also weaponize “security” language to scare people into accepting unnecessary surveillance or data collection. Our job is to **strike the balance**: use security in service of privacy, and avoid fear-driven shortcuts that erode it.
+
+These are general guidelines to apply when coding under the VaultWares umbrella. Use common sense to determine what applies to your project. When tradeoffs are unavoidable, default to: **Privacy (Individuals) → Security → Functionality**. After that, optimize for performance and scalability. Always follow best practices for the specific language and framework you are using, but when in doubt, refer to these guidelines.
 
 ## 🚀 Core Tech Stack (varies by project, needs, and team preferences)
 
@@ -67,11 +69,15 @@ These are general guidelines to apply when coding under the VaultWares umbrella.
 
 **View STYLE.md**
 
-## 🔒 Security Principles
+## 🧭 Principles (Privacy → Security → Functionality)
 
 - **Minimalist Footprint:** Zero-dependency policy for non-essential features.
 
-- **Security First:** Follow OWASP Principles. Always sanitize user inputs. If writing SQL or Supabase queries, ensure Row Level Security (RLS) is considered.
+- **Privacy First (Primary):** Collect the minimum data needed, keep it for the shortest time possible, and make sharing optional. Avoid logging personal data. Prefer local-first processing when it makes sense. Be clear with users about what happens to their information.
+
+- **Security (Second):** Follow OWASP principles. Always validate and sanitize user input. If writing SQL or Supabase queries, ensure Row Level Security (RLS) and least-privilege access are considered.
+
+- **Functionality (Third):** Make the safe choice the easy choice. Keep flows simple, labels plain-language, and defaults privacy-preserving. If something would confuse a non-technical user, redesign it.
 
 - **Error Handling:** Use a centralized error-boundary pattern. Don't just console.log(error); provide user-friendly feedback using a Toast component.
 

@@ -27,7 +27,8 @@ class TestCoreIntegration(unittest.TestCase):
                     input_file,
                     output_file=output_file,
                     skip_vocal_isolation=True,
-                    overwrite=True
+                    overwrite=True,
+                    engine="parakeet"
                 )
 
             self.assertEqual(len(outputs), 1)

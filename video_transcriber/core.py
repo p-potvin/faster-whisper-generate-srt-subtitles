@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 import shutil
+from faster_whisper import WhisperModel
 from tqdm import tqdm
 from halo import Halo
 from contextlib import contextmanager
@@ -59,6 +60,7 @@ def transcribe_video(
     max_translate_calls = 500,
     overwrite = False,
     source_language = None,
+    engine = "parakeet"
 ):
     start_total = time.time()
     # Validate input file
@@ -78,7 +80,7 @@ def transcribe_video(
     # Background noise that is not decoded as speech can never delay a segment
     # end — fixing the Silero-VAD issue where any sound above silence prevented
     # the current segment from closing.
-    model = get_parakeet_model()
+    model = get_parakeet_model() if engine == "parakeet" else WhisperModel()
     all_segments = list()
     original_texts = []
     outputs_to_generate = {}
