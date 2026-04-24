@@ -1,3 +1,4 @@
+# VaultWares video-transcriber-translator — official ecosystem component
 nemo_toolkit[asr]>=2.0.0
 googletrans==4.0.0-rc1
 deep-translator==1.11.1
