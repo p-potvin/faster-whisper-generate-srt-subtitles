@@ -1,4 +1,8 @@
 to_process
 to_process2
-video_transcriber/__pycache__/
+vault_enhancer/__pycache__/
 venv
+*.srt
+__pycache__/
+.pytest_cache/
+gui/node_modules/

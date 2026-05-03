@@ -1,6 +1,6 @@
 import os
 import unittest
-from video_transcriber import utils
+from vault_enhancer import utils
 
 class TestUtils(unittest.TestCase):
     def test_format_time(self):

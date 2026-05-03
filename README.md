@@ -1,49 +1,87 @@
 <img src="https://raw.githubusercontent.com/p-potvin/vaultwares-docs/main/logo/vaultwares-logo.svg">
 
-# video-transcriber-translator
+# Vault Video Enhancer
 
-**Video Transcription &amp; Multi-Language Translation Tool**  
-**Part of the VaultWares Ecosystem** • <a href="https://docs.vaultwares.com">docs.vaultwares.com</a> • <a href="https://vaultwares.com">vaultwares.com</a>
+**High-Performance Video Transcription & Multi-Language Translation Tool**  
+Part of the VaultWares Ecosystem • [docs.vaultwares.com](https://docs.vaultwares.com) • [vaultwares.com](https://vaultwares.com)
 
 **Generate high-quality .srt subtitles from audio/video files and translate them into any number of languages using local models. Powers subtitles in vault-player and feeds into vaultwares-pipelines.**
 
-## Overview
-This repository (forked from faster-whisper SRT generator) provides fast, accurate, local-first transcription + translation capabilities for media files across the VaultWares ecosystem.
+---
 
-## Features
-- High-accuracy transcription via faster-whisper
-- Multi-language translation (any target languages)
-- .srt subtitle output
-- Batch processing support
-- Integration with realtime-stt for live streams
-- Seamless handoff to vault-player and vault-flows
-- Agent coordination ready (via vaultwares-agentciation)
+## 🚀 Features
 
-## Quick Start
+- **Dual Engines:** High-speed transcription via `faster-whisper` or high-precision via NVIDIA `Parakeet-TDT`.
+- **Vocal Isolation:** Integrated `Demucs` support for cleaner transcription in noisy environments.
+- **Multi-Language:** Translate into multiple target languages simultaneously.
+- **Batch Processing:** Recursive folder scanning with extension filtering.
+- **VaultWares Native:** Built-in compliance with VaultWares Brand & Privacy guidelines.
+
+---
+
+## 🛠️ Usage
+
+### Command Line Interface
 
 ```bash
-git clone https://github.com/p-potvin/video-transcriber-translator.git
-cd video-transcriber-translator
-git submodule update --init --recursive
-pip install -r requirements.txt
-
-python transcribe_and_translate.py --input video.mp4 --languages en fr es
+python enhancer.py --input video.mp4 --languages en,fr,es --engine parakeet
 ```
 
-Architecture &amp; Agent Integration
-Fully synchronized with the VaultWares Agent Knowledge Dissemination System:
-→ https://raw.githubusercontent.com/p-potvin/vaultwares-docs/main/agents/knowledge-dissemination.mdx
-Can invoke the full Google ADK-powered VaultWares agent team via invoke_vaultwares_team skill for complex translation or quality improvement tasks.
-Privacy &amp; Security
+#### Advanced Options
 
-100% local processing by default
-No cloud APIs unless explicitly enabled
-Full model weights stay on-device
-Threat model available in central docs
+| Argument | Default | Description |
+| :--- | :--- | :--- |
+| `--input_file` | None | Path to a single video/audio file. |
+| `--scan-dir` | `to_process` | Recursively scan this directory for media. |
+| `--languages` | `en` | Comma-separated target languages (e.g., `en,fr,es`). |
+| `--engine` | `parakeet` | Transcription engine: `whisper` or `parakeet`. |
+| `--source-language` | `None` | Force a specific source language to prevent hallucinations. |
+| `--skip-original` | `False` | Do not generate the original language SRT file. |
+| `--skip-vocal-isolation` | `False` | Skip Demucs vocal isolation (faster but noisier). |
+| `--translate-api` | `deep-translator` | Backend: `googletrans` or `deep-translator`. |
+| `--translate-mode` | `all` | `all` (translate everything) or `non-target` (detected != target). |
+| `--max-translate-chars` | `1000000` | Skip translation if total chars exceed this limit. |
+| `--max-translate-calls` | `500` | Max translator calls per video. |
+| `--max-duration` | `7200` | Skip media files longer than this (in seconds). |
+| `--continue-on-error` | `False` | Continue to the next file if one fails in scan mode. |
+| `--overwrite` | `False` | Overwrite existing SRT files. |
+| `--extensions` | `.mp4,.mkv...` | Comma-separated extensions for scan mode. |
 
-Contributing
-See CONTRIBUTING.md and the central Brand Guidelines.
-License
-GPL-3.0 (see LICENSE)
-Built with ❤️ for privacy
+### Graphical User Interface
 
+A native **PySide6** GUI is provided for an interactive experience:
+
+```bash
+python vault_gui.py
+```
+
+---
+
+## 🔒 Privacy & Security
+
+- **100% Local Processing:** Model weights stay on-device.
+- **No Telemetry:** No tracking, no data exfiltration.
+- **Bilingual by Design:** Fully supports English and French UI and processing.
+
+---
+
+## 🎨 Branding
+
+The **VaultWares Theme** design system has been added as a git submodule to `vault-themes/`.
+
+When incorporating logos (such as favicons or when the full logo doesn't fit), use the **minimal logos** which feature only the "V" part of the logo.
+
+- **Minimal Logos:** Located at `vault-themes/Brand/minimal-logos/`
+- **Favicons:** Located at `vault-themes/Brand/favicons/`
+
+**Note:** The `-ink-filled`, `-mono-filled`, and `gold-filled` versions should be the default variations used.
+
+---
+
+## 🤝 Contributing
+
+See `CONTRIBUTING.md` and the central **VaultWares Brand Guidelines**.
+
+---
+
+*Built with ❤️ for privacy and accuracy by the VaultWares team.*

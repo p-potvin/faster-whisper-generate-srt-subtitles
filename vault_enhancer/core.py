@@ -7,9 +7,9 @@ from faster_whisper import WhisperModel
 from tqdm import tqdm
 from halo import Halo
 from contextlib import contextmanager
-from video_transcriber import utils
-from video_transcriber import translation
-from video_transcriber import media
+from vault_enhancer import utils
+from vault_enhancer import translation
+from vault_enhancer import media
 
 _WHISPER_MODEL = None
 _PARAKEET_MODEL = None
@@ -30,7 +30,7 @@ def temporary_directory(prefix = "transcriber_"):
 def get_parakeet_model():
     global _PARAKEET_MODEL
     if _PARAKEET_MODEL is None:
-        from video_transcriber.parakeet_wrapper import ParakeetV3Wrapper
+        from vault_enhancer.parakeet_wrapper import ParakeetV3Wrapper
         _PARAKEET_MODEL = ParakeetV3Wrapper(model_name="nvidia/canary-1b")
     return _PARAKEET_MODEL
 

@@ -37,7 +37,7 @@ googletrans.Translator = FakeDetector
 sys.modules["googletrans"] = googletrans
 
 # Now import the project's translation module and run a test
-from video_transcriber import translation
+from vault_enhancer import translation
 
 # Test 1: List of strings (Backwards compatibility)
 texts = ["Hello world", "Hola spanish amigos"]

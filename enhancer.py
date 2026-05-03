@@ -11,9 +11,9 @@ import time
 
 def main():
     # Only import heavy dependencies inside main() to speed up interpreter exit/error paths
-    from video_transcriber import core
-    from video_transcriber import utils
-    from video_transcriber import media
+    from vault_enhancer import core
+    from vault_enhancer import utils
+    from vault_enhancer import media
 
     utils.set_correlation_id()
     utils.log_info("Starting video transcriber-translator")
@@ -41,7 +41,7 @@ def main():
     parser.add_argument("--continue-on-error", action="store_true", help="For scan mode, continue to next file when one fails")
     parser.add_argument("--overwrite", action="store_true", dest="overwrite", default=False, help="Overwrite existing SRT files")
     parser.add_argument("--source-language", default=None, help="Force Whisper to use a specific source language (e.g. 'en', 'es'). Prevents language-switching hallucinations.")
-    parser.add_argument("--engine", choices=["whisper", "parakeet"], default="whisper", help="Transcription engine to use")
+    parser.add_argument("--engine", choices=["whisper", "parakeet"], default="parakeet", help="Transcription engine to use")
     parser.add_argument("--extensions", default=".mp4,.mkv,.avi,.mov,.flv,.webm,.mp3,.wav,.m4a", help="Comma-separated media extensions for scan mode",
     )
 

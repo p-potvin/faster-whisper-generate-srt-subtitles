@@ -1,11 +1,11 @@
 import os
 import unittest
 from unittest.mock import patch, MagicMock
-from video_transcriber import core
-from video_transcriber.parakeet_wrapper import TranscriptSegment
+from vault_enhancer import core
+from vault_enhancer.parakeet_wrapper import TranscriptSegment
 
 class TestCoreIntegration(unittest.TestCase):
-    @patch("video_transcriber.media.isolate_vocals_with_demucs")
+    @patch("vault_enhancer.media.isolate_vocals_with_demucs")
     def test_transcribe_video_mocked(self, mock_isolate):
         mock_isolate.return_value = None  # triggers fallback to input_file
 
@@ -22,7 +22,7 @@ class TestCoreIntegration(unittest.TestCase):
             f.write("dummy content")
 
         try:
-            with patch("video_transcriber.core.get_parakeet_model", return_value=mock_transcriber):
+            with patch("vault_enhancer.core.get_parakeet_model", return_value=mock_transcriber):
                 outputs = core.transcribe_video(
                     input_file,
                     output_file=output_file,

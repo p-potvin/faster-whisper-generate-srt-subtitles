@@ -63,7 +63,7 @@ class ParakeetTranscriber:
         import torch
         import nemo.collections.asr as nemo_asr
 
-        self.logger = logging.getLogger("video_transcriber.parakeet")
+        self.logger = logging.getLogger("vault_enhancer.parakeet")
         self.logger.info(f"Loading Parakeet model: {model_name}")
 
         self.model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(model_name)

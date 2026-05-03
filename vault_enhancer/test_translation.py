@@ -1,7 +1,7 @@
 import unittest
 import asyncio
 from unittest.mock import MagicMock, patch
-from video_transcriber import translation
+from vault_enhancer import translation
 
 class TestTranslation(unittest.TestCase):
     def setUp(self):
