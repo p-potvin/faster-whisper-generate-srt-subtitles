@@ -9,18 +9,14 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "vault-themes"))
+from qt_exporter import QtThemeExporter
+
 # Import core logic
 from vault_enhancer import core, utils, media
 
-# VaultWares Theme Tokens
-VAULT_BASE = "#002B36"
-VAULT_PAPER = "#FDF6E3"
-VAULT_GOLD = "#CC9B21"
-VAULT_CYAN = "#21B8CC"
-VAULT_GREEN = "#4ECC21"
-VAULT_BURGUNDY = "#A63D40"
-VAULT_SLATE = "#4A5459"
-VAULT_MUTED = "#586E75"
+# VaultWares Theme Tokens are centralized in vault-themes module.
 
 class TranscriptionWorker(QThread):
     finished = Signal(list)
@@ -44,6 +40,9 @@ class VaultWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Vault Video Enhancer")
         self.setMinimumSize(900, 800)
+        self.exporter = QtThemeExporter()
+        self.themes = self.exporter.get_all_themes()
+        self.current_theme = self.themes[0]  #Default:Solarized Light Revisited
         self.init_ui()
         self.apply_vault_styles()
 
@@ -59,15 +58,23 @@ class VaultWindow(QMainWindow):
         logo_label = QLabel("V")
         logo_label.setFixedSize(40, 40)
         logo_label.setAlignment(Qt.AlignCenter)
-        logo_label.setStyleSheet(f"background-color: {VAULT_GOLD}; color: {VAULT_BASE}; font-weight: bold; font-size: 20px; border-radius: 8px;")
+        logo_label.setObjectName("LogoLabel")
         
-        title_label = QLabel("Media <span style='color: {VAULT_GOLD}'>Transcriber</span>")
-        title_label.setStyleSheet("font-size: 24px; font-weight: 500;")
-        title_label.setTextFormat(Qt.RichText)
+        self.title_label = QLabel(f"Media <span style='color: {self.current_theme.accent}'>Transcriber</span>")
+        self.title_label.setStyleSheet("font-size: 24px; font-weight: 500;")
+        self.title_label.setTextFormat(Qt.RichText)
+
+        self.theme_combo = QComboBox()
+        for t in self.themes:
+            self.theme_combo.addItem(t.name)
+        self.theme_combo.setCurrentText(self.current_theme.name)
+        self.theme_combo.currentTextChanged.connect(self.change_theme)
 
         header_layout.addWidget(logo_label)
-        header_layout.addWidget(title_label)
+        header_layout.addWidget(self.title_label)
         header_layout.addStretch()
+        header_layout.addWidget(QLabel("Theme:"))
+        header_layout.addWidget(self.theme_combo)
         main_layout.addLayout(header_layout)
 
         # Main Split
@@ -80,7 +87,7 @@ class VaultWindow(QMainWindow):
         config_layout.setSpacing(15)
 
         config_title = QLabel("PIPELINE CONFIGURATION")
-        config_title.setStyleSheet(f"color: {VAULT_GOLD}; font-size: 14px; font-weight: bold; letter-spacing: 2px;")
+        config_title.setObjectName("SectionTitleConfig")
         config_layout.addWidget(config_title)
 
         # Input Path
@@ -139,6 +146,7 @@ class VaultWindow(QMainWindow):
         config_layout.addLayout(trans_grid)
 
         # Source Language & Max Duration
+        # Source Language & Max Duration
         limit_grid = QHBoxLayout()
         
         v_src = QVBoxLayout()
@@ -147,6 +155,7 @@ class VaultWindow(QMainWindow):
         v_src.addWidget(QLabel("Source Language (Override)"))
         v_src.addWidget(self.src_lang_edit)
         limit_grid.addLayout(v_src)
+        limit_grid.setSpacing(20) # Spacing between Source Language and Max Duration
 
         v_dur = QVBoxLayout()
         self.max_duration = QSpinBox()
@@ -158,6 +167,7 @@ class VaultWindow(QMainWindow):
         limit_grid.addLayout(v_dur)
 
         config_layout.addLayout(limit_grid)
+        config_layout.addSpacing(10) # Spacing before toggles
 
         # Toggles Grid
         toggles_grid = QHBoxLayout()
@@ -195,7 +205,7 @@ class VaultWindow(QMainWindow):
         monitor_layout = QVBoxLayout(monitor_frame)
         
         monitor_title = QLabel("VAULT ACTIVITY MONITOR")
-        monitor_title.setStyleSheet(f"color: {VAULT_CYAN}; font-size: 14px; font-weight: bold; letter-spacing: 2px;")
+        monitor_title.setObjectName("SectionTitleMonitor")
         monitor_layout.addWidget(monitor_title)
 
         self.log_area = QTextEdit()
@@ -213,10 +223,10 @@ class VaultWindow(QMainWindow):
         main_layout.addLayout(content_layout)
 
         # Footer
-        footer = QLabel("© 2026 VaultWares — Built under VaultWares Enterprise Guidelines")
-        footer.setAlignment(Qt.AlignCenter)
-        footer.setStyleSheet(f"color: {VAULT_MUTED}; font-size: 10px; letter-spacing: 3px; text-transform: uppercase;")
-        main_layout.addWidget(footer)
+        self.footer = QLabel("© 2026 VaultWares — Built under VaultWares Enterprise Guidelines")
+        self.footer.setAlignment(Qt.AlignCenter)
+        self.footer.setObjectName("FooterLabel")
+        main_layout.addWidget(self.footer)
 
     def create_separator(self):
         line = QFrame()
@@ -225,46 +235,18 @@ class VaultWindow(QMainWindow):
         line.setStyleSheet(f"background-color: rgba(74, 84, 89, 0.1); max-height: 1px;")
         return line
 
+    def change_theme(self, theme_name):
+        for t in self.themes:
+            if t.name == theme_name:
+                self.current_theme = t
+                break
+        self.apply_vault_styles()
+
     def apply_vault_styles(self):
-        self.setStyleSheet(f"""
-            QMainWindow {{ background-color: {VAULT_BASE}; color: {VAULT_PAPER}; }}
-            QLabel {{ color: {VAULT_PAPER}; font-family: 'Inter', 'Segoe UI Semilight'; font-size: 12px; }}
-            QLineEdit, QComboBox, QTextEdit, QSpinBox {{
-                background-color: rgba(74, 84, 89, 0.1);
-                border: 1px solid rgba(74, 84, 89, 0.3);
-                border-radius: 8px;
-                padding: 10px;
-                color: {VAULT_PAPER};
-                font-family: 'Inter';
-            }}
-            QLineEdit:focus {{ border-color: {VAULT_GOLD}; }}
-            QPushButton {{
-                background-color: rgba(74, 84, 89, 0.2);
-                border: none;
-                border-radius: 8px;
-                padding: 12px 20px;
-                color: {VAULT_PAPER};
-                font-weight: 500;
-            }}
-            QPushButton:hover {{ background-color: rgba(74, 84, 89, 0.3); }}
-            QPushButton#PrimaryBtn {{
-                background-color: {VAULT_GOLD};
-                color: {VAULT_BASE};
-                font-weight: bold;
-                font-size: 15px;
-            }}
-            QPushButton#PrimaryBtn:hover {{ background-color: #E5C06A; }}
-            QCheckBox {{ color: {VAULT_PAPER}; font-size: 12px; }}
-            QCheckBox::indicator {{ width: 18px; height: 18px; border: 1px solid {VAULT_SLATE}; border-radius: 5px; background-color: {VAULT_BASE}; }}
-            QCheckBox::indicator:checked {{ background-color: {VAULT_GOLD}; border-color: {VAULT_GOLD}; }}
-            QFrame#ConfigPanel, QFrame#MonitorPanel {{
-                background-color: rgba(74, 84, 89, 0.05);
-                border: 1px solid rgba(74, 84, 89, 0.1);
-                border-radius: 16px;
-            }}
-            QProgressBar {{ background-color: rgba(74, 84, 89, 0.2); border: none; border-radius: 6px; }}
-            QProgressBar::chunk {{ background-color: {VAULT_GOLD}; border-radius: 6px; }}
-        """)
+        self.setStyleSheet(self.exporter.generate_qss(self.current_theme))
+        self.title_label.setText(f"Media <span style='color: {self.current_theme.accent}'>Transcriber</span>")
+        # Update colors that need manual override if QSS doesn't catch them or for rich text
+        pass
 
     def browse_input(self):
         path = QFileDialog.getOpenFileName(self, "Select Media", "", "Media Files (*.mp4 *.mkv *.avi *.mov *.flv *.webm *.mp3 *.wav *.m4a);;All Files (*)")[0]

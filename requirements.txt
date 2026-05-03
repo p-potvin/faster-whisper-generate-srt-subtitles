@@ -6,3 +6,4 @@ demucs
 pydub==0.25.1
 halo==0.0.31
 PySide6==6.11.0
+faster-whisper
