@@ -3,10 +3,23 @@ import os
 import tempfile
 import time
 import shutil
-from faster_whisper import WhisperModel
-from tqdm import tqdm
-from halo import Halo
 from contextlib import contextmanager
+
+# Silence tqdm globally to keep terminal clean
+import tqdm
+class DummyTqdm:
+    def __init__(self, iterable=None, *args, **kwargs):
+        self.iterable = iterable
+    def __iter__(self):
+        return iter(self.iterable) if self.iterable is not None else self
+    def __next__(self):
+        raise StopIteration
+    def update(self, *args, **kwargs): pass
+    def close(self): pass
+    def write(self, s, *args, **kwargs): print(s)
+    def set_description(self, *args, **kwargs): pass
+    def set_postfix(self, *args, **kwargs): pass
+tqdm.tqdm = DummyTqdm
 from vault_enhancer import utils
 from vault_enhancer import translation
 from vault_enhancer import media
@@ -14,39 +27,12 @@ from vault_enhancer import media
 _WHISPER_MODEL = None
 _PARAKEET_MODEL = None
 
-@contextmanager
-def temporary_directory(prefix = "transcriber_"):
-    temp_dir = tempfile.mkdtemp(prefix = prefix)
-    try:
-        yield temp_dir
-    finally:
-        if os.path.exists(temp_dir):
-            try:
-                shutil.rmtree(temp_dir)
-            except Exception as e:
-                print(f"Warning: Failed to clean up temp directory {temp_dir}: {e}")
-
-@Halo(text='Loading Parakeet Model...', color='cyan', spinner='star')
 def get_parakeet_model():
     global _PARAKEET_MODEL
     if _PARAKEET_MODEL is None:
         from vault_enhancer.parakeet_wrapper import ParakeetV3Wrapper
-        _PARAKEET_MODEL = ParakeetV3Wrapper(model_name="nvidia/canary-1b")
+        _PARAKEET_MODEL = ParakeetV3Wrapper()
     return _PARAKEET_MODEL
-
-@Halo(text='Isolating vocals...', color='red', spinner='dots12')
-def get_isolated_vocals(input_file, temp_dir):    
-    try:
-        isolated_audio_file = media.isolate_vocals_with_demucs(
-            input_file,
-            temp_dir,
-            device = "cuda"
-        )
-
-        return isolated_audio_file
-    except Exception as e:
-        print(f"Warning: Vocal isolation failed: {e}. Falling back to original audio.")
-        return input_file
 
 def transcribe_video(
     input_file,
@@ -60,7 +46,10 @@ def transcribe_video(
     max_translate_calls = 500,
     overwrite = False,
     source_language = None,
-    engine = "parakeet"
+    engine = "parakeet",
+    delay_ms = 0,
+    max_duration = 7200,
+    progress_callback = None
 ):
     start_total = time.time()
     # Validate input file
@@ -69,18 +58,11 @@ def transcribe_video(
             raise ValueError(f"Input path is a directory, not a file: {input_file}")
         else:
             raise FileNotFoundError(f"Input file does not exist: {input_file}")
-  
+   
     # Check if all requested output files already exist when overwrite is disabled
     if not overwrite and media.srt_files_exist(input_file, output_file, languages, skip_original):
         return []
 
-    # --- Vocal Isolation and Transcription with Parakeet ---
-    # Parakeet-TDT produces word-level timestamps so segment boundaries are
-    # derived from actual voice pauses (gaps between recognised words).
-    # Background noise that is not decoded as speech can never delay a segment
-    # end — fixing the Silero-VAD issue where any sound above silence prevented
-    # the current segment from closing.
-    model = get_parakeet_model() if engine == "parakeet" else WhisperModel()
     all_segments = list()
     original_texts = []
     outputs_to_generate = {}
@@ -98,20 +80,49 @@ def transcribe_video(
         min_speech_duration_ms = 300
     )
 
-    print(f"--- Step 1: Isolating Vocals (Demucs) ---")
-    with temporary_directory() as temp_dir:
-        if skip_vocal_isolation:
-            print("Skipping vocal isolation as requested.")
-            transcription_file = input_file
-        else:
-            transcription_file = get_isolated_vocals(input_file, temp_dir = temp_dir)
+    print(f"--- Step 1: Pre-processing (Fix Audio & Re-encode) ---")
+    if progress_callback:
+        progress_callback("Initiating Media Pipeline...", 5)
 
-        print(f"--- Step 2: Transcribing Isolated Vocals (Parakeet-TDT) ---")
-        print(transcription_file)
-        all_segments = model.transcribe_file(
-            transcription_file,
-            language=source_language or "en",
-        )
+    if skip_vocal_isolation:
+        print("Skipping audio fix as requested.")
+        transcription_file = input_file
+    else:
+        try:
+            transcription_file = media.fix_audio_and_reencode(
+                input_file, 
+                delay_ms=delay_ms, 
+                max_duration=max_duration,
+                progress_callback=progress_callback
+            )
+        except Exception as e:
+            print(f"Warning: Audio fix failed: {e}. Falling back to original video.")
+            transcription_file = input_file
+
+    print(f"--- Step 2: Transcribing Video ({engine.capitalize()}) ---")
+    # Extract WAV for reliable ASR loading (bypasses torchaudio FFmpeg extension bugs)
+    if progress_callback:
+        progress_callback("Extracting audio for ASR...", 48)
+    asr_wav_file = media.extract_wav_for_asr(transcription_file)
+    print(f"Source file for transcription (WAV): {asr_wav_file}")
+    
+    if engine == "parakeet":
+        model = get_parakeet_model()
+    else:
+        from faster_whisper import WhisperModel
+        model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+    
+    if progress_callback:
+        progress_callback("Step 2: Transcribing Audio...", 50)
+        
+    all_segments = model.transcribe_file(
+        asr_wav_file,
+        language=source_language or "en",
+    )
+    
+    # Cleanup ASR temp file
+    if os.path.exists(asr_wav_file):
+        os.remove(asr_wav_file)
 
     audio_duration = media.get_audio_duration_seconds(input_file) or 0.0
 
@@ -127,41 +138,45 @@ def transcribe_video(
 
     srt_path = output_base + ".srt"
     outputs_to_generate[srt_path] = original_texts
+    
+    # Generate an explicit .en.srt by default
+    en_srt_path = output_base + ".en.srt"
+    outputs_to_generate[en_srt_path] = original_texts
 
     # Translate if user provided target languages
     print(f"--- Step 3: Translating the transcribed vocals (Deep Translator) ---")
-    with Halo(text="Translating segments...", color="magenta", spinner="dots"):
-        if languages:        
-            target_languages = languages if isinstance(languages, list) and len(languages) > 0 else source_language
+    print("Translating segments...")
+    if languages:        
+        target_languages = languages if isinstance(languages, list) and len(languages) > 0 else source_language
+        
+        for lang_code in target_languages:
+            lang_code = lang_code.strip().lower()
+
+            if not lang_code or lang_code in ("orig", "original", "none"):
+                continue
+
+            srt_lang_path = f"{output_base}.{lang_code}.srt"
             
-            for lang_code in target_languages:
-                lang_code = lang_code.strip().lower()
-
-                if not lang_code or lang_code in ("orig", "original", "none"):
-                    continue
-
-                srt_lang_path = f"{output_base}.{lang_code}.srt"
-                
-                import asyncio
-                trans_start_ts = time.time()
-                try:
-                    # Use metadata from segments to guide translation
-                    translated_texts = asyncio.run(translation.translate_segments(
-                        all_segments,
-                        target_lang = lang_code,
-                        translate_api = translate_api,
-                        translate_mode = translate_mode,
-                        max_chars = max_translate_chars,
-                        max_calls = max_translate_calls,
-                        detector = None,
-                    ))
-                    trans_elapsed = time.time() - trans_start_ts
-                    print(f"Translation to {lang_code} completed in {trans_elapsed:.2f}s")
-                except Exception as exc:
-                    print(f"Skipping translation to {lang_code}: {exc}")
-                    continue
-                
-                outputs_to_generate[srt_lang_path] = translated_texts
+            import asyncio
+            trans_start_ts = time.time()
+            try:
+                # Use metadata from segments to guide translation
+                translated_texts = asyncio.run(translation.translate_segments(
+                    all_segments,
+                    target_lang = lang_code,
+                    translate_api = translate_api,
+                    translate_mode = translate_mode,
+                    max_chars = max_translate_chars,
+                    max_calls = max_translate_calls,
+                    detector = None,
+                ))
+                trans_elapsed = time.time() - trans_start_ts
+                print(f"Translation to {lang_code} completed in {trans_elapsed:.2f}s")
+            except Exception as exc:
+                print(f"Skipping translation to {lang_code}: {exc}")
+                continue
+            
+            outputs_to_generate[srt_lang_path] = translated_texts
 
         if not outputs_to_generate:
             print("No new files to generate.")
