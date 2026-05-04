@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QScrollArea, QSpacerItem
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize
-from PySide6.QtGui import QPixmap, QIcon, QFont, QColor, QPalette
+from PySide6.QtGui import QPixmap, QIcon, QFont, QColor, QPalette,  QKeySequence, QShortcut
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "vault-themes"))
@@ -147,6 +147,7 @@ class VaultWindow(QMainWindow):
 
         self.init_ui()
         self.apply_vault_styles()
+        self.setAcceptDrops(True)
 
         self.log_signal.connect(self.log)
         self.original_stdout = sys.stdout
@@ -410,6 +411,74 @@ class VaultWindow(QMainWindow):
         return panel
 
     # ── Helpers ──────────────────────────────────────────────────────────────
+
+        # --- Accessibility & Tooltips ---
+        self.theme_combo.setToolTip("Select UI Theme")
+        self.input_edit.setToolTip("Path to the video/audio file to process")
+        browse_btn.setToolTip("Browse for media file (Ctrl+O)")
+        self.lang_edit.setToolTip("Comma-separated target languages for translation (e.g., en, fr, es)")
+        self.engine_combo.setToolTip("Transcription engine to use")
+        self.api_combo.setToolTip("Translation backend service")
+        self.mode_combo.setToolTip("'all' translates everything; 'non-target' only translates if original isn't the target")
+        self.src_lang_edit.setToolTip("Force a specific source language if auto-detect fails")
+        self.max_duration.setToolTip("Skip media longer than this (seconds)")
+        self.vocal_check.setToolTip("Use Demucs to isolate vocals before transcription for better accuracy in noisy audio")
+        self.skip_orig_check.setToolTip("Do not generate the SRT file for the original spoken language")
+        self.overwrite_check.setToolTip("Overwrite existing SRT files if they exist")
+        self.continue_err_check.setToolTip("Continue processing next files if one fails (Scan Mode only)")
+        self.start_btn.setToolTip("Initiate transcription pipeline (Ctrl+Return)")
+
+        # --- Tab Order ---
+        QWidget.setTabOrder(self.theme_combo, self.input_edit)
+        QWidget.setTabOrder(self.input_edit, browse_btn)
+        QWidget.setTabOrder(browse_btn, self.lang_edit)
+        QWidget.setTabOrder(self.lang_edit, self.engine_combo)
+        QWidget.setTabOrder(self.engine_combo, self.api_combo)
+        QWidget.setTabOrder(self.api_combo, self.mode_combo)
+        QWidget.setTabOrder(self.mode_combo, self.src_lang_edit)
+        QWidget.setTabOrder(self.src_lang_edit, self.max_duration)
+        QWidget.setTabOrder(self.max_duration, self.vocal_check)
+        QWidget.setTabOrder(self.vocal_check, self.skip_orig_check)
+        QWidget.setTabOrder(self.skip_orig_check, self.overwrite_check)
+        QWidget.setTabOrder(self.overwrite_check, self.continue_err_check)
+        QWidget.setTabOrder(self.continue_err_check, self.start_btn)
+
+        # Keyboard Shortcuts
+        self.shortcut_browse = QShortcut(QKeySequence("Ctrl+O"), self)
+        self.shortcut_browse.activated.connect(self.browse_input)
+
+        self.shortcut_start = QShortcut(QKeySequence("Ctrl+Return"), self)
+        self.shortcut_start.activated.connect(self.start_processing)
+
+        self.shortcut_start_enter = QShortcut(QKeySequence("Ctrl+Enter"), self)
+        self.shortcut_start_enter.activated.connect(self.start_processing)
+
+        self.shortcut_clear = QShortcut(QKeySequence("Esc"), self)
+        self.shortcut_clear.activated.connect(lambda: self.input_edit.clear())
+
+        # Footer
+        self.footer = QLabel("© 2026 VaultWares — Built under VaultWares Enterprise Guidelines")
+        self.footer.setAlignment(Qt.AlignCenter)
+        self.footer.setObjectName("FooterLabel")
+        main_layout.addWidget(self.footer)
+
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if urls:
+                # Get the first URL and convert to local file path
+                path = urls[0].toLocalFile()
+                self.input_edit.setText(path)
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
 
     def _field_label(self, text: str) -> QLabel:
         lbl = QLabel(text)
