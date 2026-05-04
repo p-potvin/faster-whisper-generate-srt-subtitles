@@ -26,125 +26,197 @@ def get_audio_duration_seconds(input_file):
     except Exception as exc:
         return None
 
-
-def extract_audio_to_wav(input_file, output_wav, normalize=True):
-    if not shutil.which("ffmpeg"):
-        raise RuntimeError("ffmpeg not found in PATH. Please install ffmpeg.")
+def extract_wav_for_asr(input_file):
+    """
+    Extracts a 16kHz mono WAV file from the video.
+    This guarantees that Lhotse/torchaudio will use the 'soundfile' backend,
+    completely bypassing the buggy FFmpeg C++ extension on Windows.
+    """
+    video_abs = os.path.abspath(input_file)
+    video_dir = os.path.dirname(video_abs)
+    video_name = os.path.splitext(os.path.basename(video_abs))[0]
+    wav_path = os.path.join(video_dir, f"{video_name}_asr_temp.wav")
+    
+    if os.path.exists(wav_path):
+        os.remove(wav_path)
         
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        os.path.abspath(input_file),
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", video_abs,
+        "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+        wav_path
+    ], check=True)
+    
+    return wav_path
+
+def fix_audio_and_reencode(video_path, output_path=None, delay_ms=0, bg_volume="-20dB", cq=26, fps=30, max_duration=None, progress_callback=None):
+    import sys
+    import math
+
+    video_abs = os.path.abspath(video_path)
+    video_dir = os.path.dirname(video_abs)
+    video_name, video_ext = os.path.splitext(os.path.basename(video_abs))
+
+    if not output_path:
+        output_path = os.path.join(video_dir, f"{video_name}_fixed{video_ext}")
+    output_abs = os.path.abspath(output_path)
+
+    # 1. Fast Duration Check
+    safe_duration = 0
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_abs],
+            capture_output=True, text=True, check=True
+        )
+        detected_duration = float(res.stdout.strip())
+        if max_duration and max_duration > 0:
+            safe_duration = math.floor(min(detected_duration, max_duration))
+        else:
+            safe_duration = math.floor(detected_duration)
+    except Exception as e:
+        print(f"Warning: Could not determine duration for {video_name}. Using default processing.")
+        if max_duration:
+            safe_duration = max_duration
+
+    temp_dir = os.path.join(video_dir, f"temp_demucs_{video_name}")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    import threading
+    def run_command_with_progress(cmd, desc, start_pct, scale):
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            encoding='utf-8',
+            errors='replace'
+        )
+        
+        def reader():
+            for line in process.stdout:
+                # 1. Update Progress
+                # FFmpeg style
+                if "out_time_ms=" in line:
+                    try:
+                        time_ms = int(line.split("=")[1].strip())
+                        if safe_duration > 0:
+                            pct = min(100, int((time_ms / 1000000) / safe_duration * scale) + start_pct)
+                            if progress_callback:
+                                progress_callback(f"{desc}... {pct-start_pct}%", pct)
+                    except: pass
+                # Demucs style (tqdm)
+                elif "%|" in line:
+                    try:
+                        pct_str = line.split("%")[0].strip().split()[-1]
+                        pct = int(pct_str)
+                        scaled_pct = start_pct + int(pct * (scale / 100.0))
+                        if progress_callback:
+                            progress_callback(f"{desc}... {pct}%", scaled_pct)
+                    except: pass
+                
+                # 2. Update Console/GUI Monitor (Selective to avoid signal flood)
+                # We only print lines that look like status updates
+                if any(x in line for x in ["frame=", "fps=", "size=", "time=", "bitrate=", "it/s", "s/it"]):
+                    print(line, end='', flush=True)
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        process.wait()
+        t.join()
+        
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, cmd)
+
+    # 2. Execute Demucs
+    print(f"--- Isolating Vocals for {video_name} ---")
+    if progress_callback:
+        progress_callback(f"Step 1.1: Separating Vocals (Demucs)...", 10)
+
+    demucs_cmd = [
+        sys.executable, "-m", "demucs.separate",
+        "-n", "htdemucs", "-d", "cuda", "--two-stems=vocals",
+        "--shifts=1", "--overlap=0.25", "-o", temp_dir,
+        "--filename", "{stem}.{ext}", video_abs
     ]
-    if normalize:
-        # loudnorm is superb at making speech consistently audible without clipping.
-        cmd.extend(["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"])
+
+    try:
+        run_command_with_progress(demucs_cmd, "Step 1.1: Vocal Separation", 10, 35)
+    except subprocess.CalledProcessError as e:
+        # Fallback to CPU if CUDA fails
+        print(f"Demucs CUDA failed, trying CPU.")
+        if progress_callback:
+            progress_callback("Demucs CUDA failed, falling back to CPU...", 15)
+        demucs_cmd.remove("-d")
+        demucs_cmd.remove("cuda")
+        run_command_with_progress(demucs_cmd, "Step 1.1: Vocal Separation", 15, 30)
     
-    cmd.extend([
-        "-c:a",
-        "pcm_s16le",
-        os.path.abspath(output_wav),
-    ])
-    
-    subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        check=True,
+    if progress_callback:
+        progress_callback("Step 1.1: Vocal Separation Complete", 45)
+
+    vocals_path = os.path.join(temp_dir, "htdemucs", "vocals.wav")
+    if not os.path.exists(vocals_path):
+        raise RuntimeError(f"Demucs failed to produce vocals at {vocals_path}")
+
+    # loudnorm requires buffered look-ahead, starving NVENC of audio frames.
+    # dynaudnorm is a true streaming normalizer (zero lookahead), allowing NVENC
+    # to encode at full hardware throughput without waiting on the audio graph.
+    filter_complex = (
+        f"[0:a]dynaudnorm=f=250:g=31:p=0.95:m=100[bg_norm];"
+        f"[bg_norm]volume={bg_volume}[bg];"
+        f"[1:a]highpass=f=100,dynaudnorm=f=250:g=31:p=0.95:m=100[voc];"
+        f"[bg][voc]amix=inputs=2:weights=1 1.5:duration=first:normalize=0[out_a]"
     )
 
-def isolate_vocals_with_demucs(input_audio, output_dir, device="cuda"):
-    import sys
-    os.makedirs(output_dir, exist_ok=True)
-    input_audio_abs = os.path.abspath(input_audio)
-    output_dir_abs = os.path.abspath(output_dir)
-    
-    # htdemucs is the latest and fastest model.
-    # --shifts=0: Disables equivariant stabilization (which usually takes 10x longer) for speed.
-    # --overlap=0.1: Minimum overlap to avoid artifacts but maximize speed.
-    # --segment=10: Smaller segments can be processed faster on some GPUs.
-    # --two-stems=vocals: Only extracts vocals, avoiding processing other stems.
-    cmd = [
-        sys.executable, "-m", "demucs.separate",
-        "-n", "htdemucs", # Use Hybrid Transformer Demucs (fastest)
-        "--two-stems=vocals",
-        "--shifts=0", # SIGNIFICANT SPEEDUP: avoid random shifts
-        "--overlap=0.1", # Lower overlap for faster processing
-        "-o", output_dir_abs,
-        input_audio_abs
-    ]
-    if device == "cuda":
-        cmd.insert(3, "-d")
-        cmd.insert(4, "cuda")
-    
-    import subprocess
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        stderr_out = e.stderr if e.stderr else ""
-        
-        # If it failed due to CUDA (PyTorch CPU only, or out of VRAM), fallback to CPU
-        if device == "cuda" and ("CUDA" in stderr_out or "device" in stderr_out.lower() or "AssertionError" in stderr_out or "RuntimeError" in stderr_out):
-            print(f"\n[Demucs] CUDA error encountered, retrying on CPU. (Error: {stderr_out.strip()[-200:]})")
-            if "-d" in cmd:
-                idx = cmd.index("-d")
-                cmd.pop(idx) # remove -d
-                cmd.pop(idx) # remove cuda
-            try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
-            except subprocess.CalledProcessError as e2:
-                raise RuntimeError(f"Demucs CPU fallback failed. Error:\n{e2.stderr}")
-        else:
-            raise RuntimeError(f"Demucs failed. Error:\n{stderr_out}")
-    except FileNotFoundError:
-        # Fallback if python module is not working
-        cmd = ["demucs", "--two-stems=vocals", "-o", output_dir_abs, input_audio_abs]
-        if device == "cuda":
-            cmd.insert(1, "-d")
-            cmd.insert(2, "cuda")
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e3:
-            raise RuntimeError(f"Demucs CLI failed. Error:\n{e3.stderr}")
-    except Exception as exc:
-        print(f"Unexpected error while running Demucs: {exc}")
-        return None
+    # 4. Final Muxing Args
+    off = round(delay_ms / 1000.0, 3)
+    abs_off = abs(off)
 
-    vocals_path = None
-    # Demucs version 4+ uses htdemucs/model_name/filename/vocals.wav structure
-    for root, _, files in os.walk(output_dir_abs):
-        for file in files:            
-            if file == "vocals.wav":
-                vocals_path = os.path.join(root, file)
-                break
-        if vocals_path:
-            break
-            
-    if not vocals_path:
-        print("Voice isolation with Demucs did not produce vocals.wav")
-        return None
-        
-    # Create normalized path inside the temporary directory (output_dir_abs) 
-    # to avoid file collisions across multiple processing runs.
-    normalized_path = os.path.join(output_dir_abs, os.path.splitext(os.path.basename(input_audio))[0] + "_vocals_norm.wav")
+    ffmpeg_args = ["ffmpeg", "-y", "-hide_banner", "-err_detect", "ignore_err", "-fflags", "+genpts", "-progress", "pipe:1"]
+    if safe_duration > 0:
+        ffmpeg_args.extend(["-t", str(safe_duration)])
+
+    if delay_ms > 0:
+        ffmpeg_args.extend(["-i", video_abs, "-itsoffset", str(abs_off), "-i", vocals_path])
+    elif delay_ms < 0:
+        ffmpeg_args.extend(["-itsoffset", str(abs_off), "-i", video_abs, "-i", vocals_path])
+    else:
+        ffmpeg_args.extend(["-i", video_abs, "-i", vocals_path])
+
+    ffmpeg_args.extend([
+        "-filter_complex", filter_complex,
+        "-map", "0:v:0",
+        "-map", "[out_a]",
+        # p6 vs p7: p6 skips the slowest sub-pixel motion-estimation pass with near-zero
+        # visible quality loss. Dropping -tune hq removes spatial/temporal AQ lookahead
+        # which was stalling the GPU pipeline. constqp is equivalent to vbr+cq but
+        # simpler — the GPU processes frames at a constant QP without rate-control overhead.
+        "-c:v", "h264_nvenc", "-preset", "p6", "-rc", "constqp", "-qp", str(cq), "-vf", f"fps={fps}",
+        "-c:a", "aac", "-b:a", "320k",
+        output_abs
+    ])
+
+    print("--- Re-encoding Video with Fixed Audio ---")
     try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", os.path.abspath(vocals_path), 
-                "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", 
-                "-c:a", "pcm_s16le", os.path.abspath(normalized_path)
-            ],
-            check=True, capture_output=True, text=True
-        )
-        return normalized_path
+        run_command_with_progress(ffmpeg_args, "Step 1.2: Encoding", 50, 50)
     except subprocess.CalledProcessError as e:
-        print(f"Warning: ffmpeg normalization failed, using raw vocals: {e.stderr}")
-        return vocals_path
+        print(f"NVENC failed, falling back to libx264.")
+        idx = ffmpeg_args.index("h264_nvenc")
+        ffmpeg_args[idx] = "libx264"
+        # Remove nvenc-specific args
+        for arg in ["-preset", "p6", "-rc", "constqp", "-qp", str(cq)]:
+            if arg in ffmpeg_args:
+                ffmpeg_args.remove(arg)
+        ffmpeg_args.extend(["-crf", "23"]) # Standard CRF for libx264
+        subprocess.run(ffmpeg_args, check=True)
+
+    # Cleanup temp
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Replace original video
+    shutil.move(output_abs, video_abs)
+    print(f"Successfully fixed audio and replaced original: {video_abs}")
+    return video_abs
 
 def find_media_files(root_dir, extensions):
     ext_set = {ext.lower() for ext in extensions}

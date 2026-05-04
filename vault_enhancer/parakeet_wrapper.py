@@ -3,16 +3,34 @@ import logging
 import subprocess
 from typing import List
 
-# Monkey-patch subprocess.Popen to NEVER open a console window on Windows
-if os.name == 'nt':
-    _original_popen = subprocess.Popen
-    class _HushPopen(_original_popen):
-        def __init__(self, *args, **kwargs):
-            if 'creationflags' not in kwargs:
-                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW | getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
-            super().__init__(*args, **kwargs)
-    subprocess.Popen = _HushPopen
+# Silence noisy NeMo / PyTorch / Lightning startup logs
+os.environ["NEMO_LOGGING_LEVEL"] = "ERROR"
+os.environ["TORCHAUDIO_DEBUG"] = "0"
+os.environ["PYTHONWARNINGS"] = "ignore"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1" 
 
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("nemo_logging").setLevel(logging.ERROR)
+logging.getLogger("torchaudio").setLevel(logging.ERROR)
+logging.getLogger("torio").setLevel(logging.ERROR)
+
+try:
+    import torch
+    torch.set_warn_always(False)
+except ImportError:
+    pass
+
+try:
+    import lhotse
+    # Permanently force the soundfile backend (bypasses FFmpeg C++ extension bugs entirely)
+    lhotse.set_current_audio_backend("LibsndfileBackend")
+    
+    # Patch Lhotse to avoid CUDA illegal memory access during random seeding on Windows
+    import lhotse.utils
+    lhotse.utils.fix_random_seed = lambda seed: None
+except ImportError:
+    pass
 
 class TranscriptSegment:
     """
@@ -53,7 +71,7 @@ class ParakeetTranscriber:
        and the translation pipeline.
     """
 
-    DEFAULT_MODEL = "nvidia/parakeet-tdt-1.1b"
+    DEFAULT_MODEL = "nvidia/parakeet-tdt-0.6b-v3"
 
     # Voice-pause thresholds (tuned for natural speech)
     DEFAULT_MIN_SILENCE_S = 0.8   # gap between words that ends a segment
@@ -66,7 +84,13 @@ class ParakeetTranscriber:
         self.logger = logging.getLogger("vault_enhancer.parakeet")
         self.logger.info(f"Loading Parakeet model: {model_name}")
 
-        self.model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(model_name)
+        # Use generic ASRModel to support Canary, Parakeet-TDT, etc.
+        if model_name.endswith(".nemo") and os.path.exists(model_name):
+            self.logger.info(f"Loading local model file: {model_name}")
+            self.model = nemo_asr.models.ASRModel.restore_from(model_name)
+        else:
+            self.logger.info(f"Restoring model from cache or downloading: {model_name}")
+            self.model = nemo_asr.models.ASRModel.from_pretrained(model_name)
         if torch.cuda.is_available():
             self.model = self.model.cuda()
         self.model.eval()
@@ -105,26 +129,65 @@ class ParakeetTranscriber:
         self.logger.info(f"Transcribing: {audio_path}  (min_silence={min_silence_s}s)")
 
         import torch
-        with torch.no_grad():
-            hypotheses = self.model.transcribe([audio_path], timestamps=True)
+        import soundfile as sf
+        import os
+        import numpy as np
+        
+        # Read the entire audio to chunk it
+        data, samplerate = sf.read(audio_path)
+        chunk_duration = 60  # seconds
+        chunk_size = chunk_duration * samplerate
+        
+        all_word_timestamps = []
+        chunk_paths = []
+        
+        try:
+            # 1. Slice audio into 60-second temporary WAV files
+            for i in range(0, len(data), chunk_size):
+                chunk_data = data[i:i+chunk_size]
+                c_path = f"{audio_path}_chunk_{len(chunk_paths)}.wav"
+                sf.write(c_path, chunk_data, samplerate)
+                chunk_paths.append((c_path, i / samplerate))
+                  # 2. Transcribe using batch_size=1. 
+            # Sequential processing (batch_size=1) is the most stable on Windows
+            # and prevents the "missed words" issue caused by batch interference.
+            # We avoid a manual loop to prevent CUDA illegal memory access errors.
+            with torch.no_grad():
+                paths_only = [p[0] for p in chunk_paths]
+                # num_workers=0 is mandatory on Windows to avoid WinError 32
+                torch.cuda.synchronize()
+                hypotheses = self.model.transcribe(paths_only, timestamps=True, batch_size=1, num_workers=0)
+            
+            # Defragment once after the large batch
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
 
-        if not hypotheses:
+            # 3. Merge timestamps with their respective time offsets
+            for (c_path, offset), hyp in zip(chunk_paths, hypotheses):
+                w_timestamps = self._extract_word_timestamps(hyp)
+                if w_timestamps:
+                    for w in w_timestamps:
+                        all_word_timestamps.append({
+                            "start": w["start"] + offset,
+                            "end": w["end"] + offset,
+                            "word": w["word"]
+                        })
+        finally:
+            # Cleanup temporary chunks
+            for p, _ in chunk_paths:
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except: pass
+
+        if not all_word_timestamps:
+            # No word timestamps available — fall back to an empty list since the chunked
+            # logic already processed all valid hypotheses.
             return []
 
-        hyp = hypotheses[0]
-        word_timestamps = self._extract_word_timestamps(hyp)
-
-        if not word_timestamps:
-            # No word timestamps available — fall back to a single segment.
-            # End time is left as 0.0 and should be treated as a best-effort
-            # placeholder; Parakeet-TDT always returns timestamps so this path
-            # is only reached if an unexpected model variant is used.
-            text = hyp.text if hasattr(hyp, "text") else str(hyp)
-            if text.strip():
-                return [TranscriptSegment(1, 0.0, 0.0, text.strip(), language)]
-            return []
-
-        return self._group_into_segments(word_timestamps, min_silence_s, min_segment_s, language)
+        return self._group_into_segments(all_word_timestamps, min_silence_s, min_segment_s, language)
     
     def transcribe_audio_data(
         self,
@@ -150,20 +213,7 @@ class ParakeetTranscriber:
         word_timestamps = self._extract_word_timestamps(hyp)
         return self._group_into_segments(word_timestamps, min_silence_s, min_segment_s, language)
 
-class ParakeetV3Wrapper:
-    """
-    Main interface for the application to interact with Parakeet natively (no Ray).
-    """
-    def __init__(self, model_name: str = "nvidia/canary-1b"):
-        # Load transcriber directly into the current thread
-        self.transcriber = ParakeetTranscriber(model_name=model_name)
-        self.logger = logging.getLogger("vaultwares.parakeet_wrapper")
 
-    def transcribe_file(self, audio_path: str, min_silence_s: float = ParakeetTranscriber.DEFAULT_MIN_SILENCE_S, min_segment_s: float = ParakeetTranscriber.DEFAULT_MIN_SEGMENT_S, language: str = "en") -> List[TranscriptSegment]:
-        return self.transcriber.transcribe_file(audio_path, min_silence_s, min_segment_s, language)
-
-    def transcribe_audio_data(self, audio_data, min_silence_s: float = ParakeetTranscriber.DEFAULT_MIN_SILENCE_S, min_segment_s: float = ParakeetTranscriber.DEFAULT_MIN_SEGMENT_S, language: str = "en") -> List[TranscriptSegment]:
-        return self.transcriber.transcribe_audio_data(audio_data, min_silence_s, min_segment_s, language)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -213,13 +263,18 @@ class ParakeetV3Wrapper:
         min_silence_s: float,
         min_segment_s: float,
         language: str,
+        max_chars: int = 180,
     ) -> List[TranscriptSegment]:
         """
         Walk through word-level timestamps and emit a new
         :class:`TranscriptSegment` whenever the gap to the next word exceeds
         *min_silence_s*.  Only segments at least *min_segment_s* long are kept.
+
+        Any segment whose text exceeds *max_chars* is then hard-split at word
+        boundaries (preferring sentence-ending punctuation) with timestamps
+        interpolated linearly between the first and last word of the sub-segment.
         """
-        segments: List[TranscriptSegment] = []
+        raw_segments: List[TranscriptSegment] = []
         seg_id = 1
         buf_words: List[str] = []
         seg_start: float = 0.0
@@ -240,7 +295,7 @@ class ParakeetV3Wrapper:
                     # Voice pause detected — flush current segment
                     if (seg_end - seg_start) >= min_segment_s:
                         text = " ".join(buf_words)
-                        segments.append(
+                        raw_segments.append(
                             TranscriptSegment(seg_id, seg_start, seg_end, text, language)
                         )
                         seg_id += 1
@@ -255,6 +310,88 @@ class ParakeetV3Wrapper:
         # Flush the final pending segment
         if buf_words and (seg_end - seg_start) >= min_segment_s:
             text = " ".join(buf_words)
-            segments.append(TranscriptSegment(seg_id, seg_start, seg_end, text, language))
+            raw_segments.append(TranscriptSegment(seg_id, seg_start, seg_end, text, language))
 
-        return segments
+        # Hard-split any segment that exceeds max_chars
+        return self._split_long_segments(raw_segments, max_chars, language)
+
+    def _split_long_segments(
+        self,
+        segments: List[TranscriptSegment],
+        max_chars: int,
+        language: str,
+    ) -> List[TranscriptSegment]:
+        """
+        Split segments whose text exceeds *max_chars* at natural word boundaries.
+        Timestamps are interpolated linearly assuming uniform word duration across
+        the segment span.
+        """
+        result: List[TranscriptSegment] = []
+        seg_id = 1
+
+        for seg in segments:
+            text = seg.text
+            if len(text) <= max_chars:
+                result.append(TranscriptSegment(seg_id, seg.start, seg.end, text, language))
+                seg_id += 1
+                continue
+
+            # Split into chunks of ≤ max_chars at word boundaries
+            words = text.split()
+            duration = seg.end - seg.start
+            chars_total = len(text)
+
+            chunks: List[List[str]] = []
+            buf: List[str] = []
+            buf_len = 0
+
+            for word in words:
+                word_len = len(word) + (1 if buf else 0)
+                if buf and buf_len + word_len > max_chars:
+                    # Prefer splitting after sentence-ending punctuation
+                    # within the last few words of the buffer
+                    split_at = len(buf)
+                    for k in range(len(buf) - 1, max(len(buf) - 5, -1), -1):
+                        if buf[k].endswith((".", "!", "?", ",", ";")):
+                            split_at = k + 1
+                            break
+                    chunks.append(buf[:split_at])
+                    buf = buf[split_at:] + [word]
+                    buf_len = len(" ".join(buf))
+                else:
+                    buf.append(word)
+                    buf_len += word_len
+
+            if buf:
+                chunks.append(buf)
+
+            # Distribute timestamps proportionally by character count
+            chunk_texts = [" ".join(c) for c in chunks]
+            chunk_lens = [len(t) for t in chunk_texts]
+            total_len = sum(chunk_lens)
+            cursor = seg.start
+
+            for chunk_text, chunk_len in zip(chunk_texts, chunk_lens):
+                chunk_duration = duration * (chunk_len / total_len) if total_len > 0 else 0
+                chunk_end = round(cursor + chunk_duration, 3)
+                result.append(TranscriptSegment(seg_id, round(cursor, 3), chunk_end, chunk_text, language))
+                seg_id += 1
+                cursor = chunk_end
+
+        return result
+
+
+class ParakeetV3Wrapper:
+    """
+    Main interface for the application to interact with Parakeet natively (no Ray).
+    """
+    def __init__(self, model_name: str = "nvidia/parakeet-tdt-0.6b-v3"):
+        # Load transcriber directly into the current thread
+        self.transcriber = ParakeetTranscriber(model_name=model_name)
+        self.logger = logging.getLogger("vaultwares.parakeet_wrapper")
+
+    def transcribe_file(self, audio_path: str, min_silence_s: float = ParakeetTranscriber.DEFAULT_MIN_SILENCE_S, min_segment_s: float = ParakeetTranscriber.DEFAULT_MIN_SEGMENT_S, language: str = "en") -> List[TranscriptSegment]:
+        return self.transcriber.transcribe_file(audio_path, min_silence_s, min_segment_s, language)
+
+    def transcribe_audio_data(self, audio_data, min_silence_s: float = ParakeetTranscriber.DEFAULT_MIN_SILENCE_S, min_segment_s: float = ParakeetTranscriber.DEFAULT_MIN_SEGMENT_S, language: str = "en") -> List[TranscriptSegment]:
+        return self.transcriber.transcribe_audio_data(audio_data, min_silence_s, min_segment_s, language)

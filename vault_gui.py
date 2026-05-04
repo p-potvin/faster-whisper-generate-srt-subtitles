@@ -3,228 +3,414 @@ import os
 import time
 from typing import List, Optional
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QLineEdit, QPushButton, QCheckBox, QComboBox, 
-    QProgressBar, QTextEdit, QFileDialog, QFrame, QSpinBox, QDoubleSpinBox
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QCheckBox, QComboBox,
+    QProgressBar, QTextEdit, QFileDialog, QFrame, QSpinBox, QDoubleSpinBox,
+    QSizePolicy, QScrollArea, QSpacerItem
 )
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QThread, Signal, QSize
+from PySide6.QtGui import QPixmap, QIcon, QFont, QColor, QPalette,  QKeySequence, QShortcut
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "vault-themes"))
 from qt_exporter import QtThemeExporter
 
-# Import core logic
 from vault_enhancer import core, utils, media
 
-# VaultWares Theme Tokens are centralized in vault-themes module.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Worker thread
+# ─────────────────────────────────────────────────────────────────────────────
 
 class TranscriptionWorker(QThread):
     finished = Signal(list)
     progress = Signal(str)
+    progress_percent = Signal(int)
     error = Signal(str)
 
     def __init__(self, params):
         super().__init__()
         self.params = params
+        self.is_running = True
 
     def run(self):
         try:
-            self.progress.emit("--- Initializing Media Pipeline ---")
-            output_paths = core.transcribe_video(**self.params)
-            self.finished.emit(output_paths)
+            input_path = self.params.get('input_file', '')
+            if not input_path:
+                self.error.emit("No input path provided.")
+                return
+
+            # Determine files to process
+            files_to_process = []
+            if os.path.isdir(input_path):
+                extensions = ['.mp4', '.mkv', '.avi', '.mov', '.flv', '.webm', '.mp3', '.wav', '.m4a']
+                files_to_process = list(media.find_media_files(input_path, extensions))
+                if not files_to_process:
+                    self.error.emit(f"No media files found in directory: {input_path}")
+                    return
+            else:
+                files_to_process = [input_path]
+
+            total_files = len(files_to_process)
+            all_outputs = []
+
+            for i, file_path in enumerate(files_to_process):
+                if not self.is_running:
+                    break
+
+                current_params = dict(self.params)
+                current_params['input_file'] = file_path
+                
+                file_basename = os.path.basename(file_path)
+                batch_prefix = f"[{i+1}/{total_files}] {file_basename}: " if total_files > 1 else ""
+                
+                self.progress.emit(f"{batch_prefix}Initializing…")
+
+                def progress_cb(text, percent):
+                    if text:
+                        self.progress.emit(f"{batch_prefix}{text}")
+                    if percent is not None:
+                        # Scale percent to be within the file's portion of the total progress
+                        overall_pct = int((i * 100 + percent) / total_files)
+                        self.progress_percent.emit(overall_pct)
+
+                current_params['progress_callback'] = progress_cb
+                current_params.pop('continue_on_error', None)
+                
+                try:
+                    output_paths = core.transcribe_video(**current_params)
+                    all_outputs.extend(output_paths)
+                except Exception as e:
+                    if self.params.get('continue_on_error', False):
+                        self.progress.emit(f"Error processing {file_basename}: {str(e)}")
+                        continue
+                    else:
+                        raise e
+                finally:
+                    # Cleanup GPU state between files in batch to prevent illegal memory access
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            try:
+                                torch.cuda.synchronize()
+                                torch.cuda.empty_cache()
+                            except:
+                                # Context might already be corrupted; ignore and move on
+                                pass
+                    except ImportError:
+                        pass
+                    time.sleep(2.0)
+
+            self.finished.emit(all_outputs)
         except Exception as e:
-            self.error.emit(str(e))
+            import traceback
+            self.error.emit(f"{str(e)}\n{traceback.format_exc()}")
+        except BaseException as e:
+            self.error.emit(f"Critical crash: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Log stream redirect
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LogStream:
+    def __init__(self, log_fn):
+        self.log_fn = log_fn
+
+    def write(self, text):
+        if text.strip():
+            import re
+            clean = re.sub(r'\x1b\[[0-9;]*[mK]', '', text)
+            if clean.strip():
+                self.log_fn(clean.strip())
+
+    def flush(self):
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main window
+# ─────────────────────────────────────────────────────────────────────────────
 
 class VaultWindow(QMainWindow):
+    log_signal = Signal(str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Vault Video Enhancer")
-        self.setMinimumSize(900, 800)
+        self.setMinimumSize(1100, 700)
+        self.setWindowState(Qt.WindowMaximized)
+
         self.exporter = QtThemeExporter()
         self.themes = self.exporter.get_all_themes()
-        self.current_theme = self.themes[0]  #Default:Solarized Light Revisited
+        self.current_theme = self.themes[0]
+
         self.init_ui()
         self.apply_vault_styles()
         self.setAcceptDrops(True)
 
+        self.log_signal.connect(self.log)
+        self.original_stdout = sys.stdout
+        self.original_stderr = sys.stderr
+        sys.stdout = LogStream(self.log_signal.emit)
+        sys.stderr = LogStream(self.log_signal.emit)
+
+    # ── UI construction ──────────────────────────────────────────────────────
+
     def init_ui(self):
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(30, 30, 30, 30)
-        main_layout.setSpacing(20)
+        root = QWidget()
+        self.setCentralWidget(root)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(16, 10, 16, 10)
+        root_layout.setSpacing(10)
 
-        # Header
-        header_layout = QHBoxLayout()
-        logo_label = QLabel("V")
-        logo_label.setFixedSize(40, 40)
-        logo_label.setAlignment(Qt.AlignCenter)
+        # ── Header ────────────────────────────────────────────────────────
+        root_layout.addWidget(self._build_header())
+        root_layout.addWidget(self._make_separator())
+
+        # ── Main split (config | monitor) ────────────────────────────────
+        split = QHBoxLayout()
+        split.setSpacing(12)
+        split.addWidget(self._build_config_panel(), stretch=4)
+        split.addWidget(self._build_monitor_panel(), stretch=6)
+        root_layout.addLayout(split, stretch=1)
+
+        # ── Footer ────────────────────────────────────────────────────────
+        root_layout.addWidget(self._make_separator())
+        footer = QLabel("© 2026 VaultWares — All processing is local. No data leaves your machine.")
+        footer.setAlignment(Qt.AlignCenter)
+        footer.setObjectName("FooterLabel")
+        root_layout.addWidget(footer)
+
+    def _build_header(self) -> QWidget:
+        w = QWidget()
+        layout = QHBoxLayout(w)
+        layout.setContentsMargins(0, 4, 0, 4)
+
+        # Logo
+        logo_label = QLabel()
+        logo_path = "vault-themes/Brand/minimal-logos/vaultwares-minimal-gold-filled.png"
+        logo_pix = QPixmap(logo_path)
+        if not logo_pix.isNull():
+            logo_label.setPixmap(logo_pix.scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.setWindowIcon(QIcon(logo_path))
         logo_label.setObjectName("LogoLabel")
-        
-        self.title_label = QLabel(f"Media <span style='color: {self.current_theme.accent}'>Transcriber</span>")
-        self.title_label.setStyleSheet("font-size: 24px; font-weight: 500;")
-        self.title_label.setTextFormat(Qt.RichText)
+        logo_label.setFixedSize(36, 36)
+        logo_label.setAlignment(Qt.AlignCenter)
 
+        # Title
+        self.title_label = QLabel()
+        self.title_label.setTextFormat(Qt.RichText)
+        self.title_label.setStyleSheet("font-size: 20px; font-weight: 300; letter-spacing: 1px;")
+
+        # Separator spacer
+        spacer = QSpacerItem(0, 0, QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        # Theme selector
+        theme_label = QLabel("Theme")
+        theme_label.setObjectName("StatusLabel")
         self.theme_combo = QComboBox()
+        self.theme_combo.setFixedWidth(220)
         for t in self.themes:
             self.theme_combo.addItem(t.name)
         self.theme_combo.setCurrentText(self.current_theme.name)
         self.theme_combo.currentTextChanged.connect(self.change_theme)
 
-        header_layout.addWidget(logo_label)
-        header_layout.addWidget(self.title_label)
-        header_layout.addStretch()
-        header_layout.addWidget(QLabel("Theme:"))
-        header_layout.addWidget(self.theme_combo)
-        main_layout.addLayout(header_layout)
+        layout.addWidget(logo_label)
+        layout.addSpacing(10)
+        layout.addWidget(self.title_label)
+        layout.addItem(spacer)
+        layout.addWidget(theme_label)
+        layout.addSpacing(6)
+        layout.addWidget(self.theme_combo)
 
-        # Main Split
-        content_layout = QHBoxLayout()
-        
-        # --- Config Column ---
-        config_scroll = QFrame()
-        config_scroll.setObjectName("ConfigPanel")
-        config_layout = QVBoxLayout(config_scroll)
-        config_layout.setSpacing(15)
+        return w
 
-        config_title = QLabel("PIPELINE CONFIGURATION")
-        config_title.setObjectName("SectionTitleConfig")
-        config_layout.addWidget(config_title)
+    def _build_config_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("ConfigPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(14)
 
-        # Input Path
+        # Title
+        title = QLabel("PIPELINE CONFIGURATION")
+        title.setObjectName("SectionTitleConfig")
+        layout.addWidget(title)
+
+        # Input path ─────────────────────────────────────────────────────
+        layout.addWidget(self._field_label("Input File or Directory"))
+        path_row = QHBoxLayout()
         self.input_edit = QLineEdit()
-        self.input_edit.setPlaceholderText("Path to video/audio or folder...")
-        browse_btn = QPushButton("Browse")
-        browse_btn.clicked.connect(self.browse_input)
+        self.input_edit.setPlaceholderText("Drop a video/audio file or folder path…")
         
-        path_layout = QHBoxLayout()
-        path_layout.addWidget(self.input_edit)
-        path_layout.addWidget(browse_btn)
-        config_layout.addWidget(QLabel("Input File / Scan Directory"))
-        config_layout.addLayout(path_layout)
-
-        # Core Options Grid
-        core_grid = QHBoxLayout()
+        browse_file_btn = QPushButton("File…")
+        browse_file_btn.setFixedWidth(70)
+        browse_file_btn.clicked.connect(self.browse_input_file)
         
-        # Languages
-        v_lang = QVBoxLayout()
-        self.lang_edit = QLineEdit("en")
-        v_lang.addWidget(QLabel("Target Languages"))
-        v_lang.addWidget(self.lang_edit)
-        core_grid.addLayout(v_lang)
+        browse_folder_btn = QPushButton("Folder…")
+        browse_folder_btn.setFixedWidth(70)
+        browse_folder_btn.clicked.connect(self.browse_input_folder)
+        
+        path_row.addWidget(self.input_edit)
+        path_row.addWidget(browse_file_btn)
+        path_row.addWidget(browse_folder_btn)
+        layout.addLayout(path_row)
 
-        # Engine
+        layout.addWidget(self._make_separator())
+
+        # Core options row ────────────────────────────────────────────────
+        core_row = QHBoxLayout()
+        core_row.setSpacing(12)
+
         v_engine = QVBoxLayout()
+        v_engine.addWidget(self._field_label("ASR Engine"))
         self.engine_combo = QComboBox()
         self.engine_combo.addItems(["parakeet", "whisper"])
         self.engine_combo.setCurrentText("parakeet")
-        v_engine.addWidget(QLabel("Engine"))
         v_engine.addWidget(self.engine_combo)
-        core_grid.addLayout(v_engine)
-        
-        config_layout.addLayout(core_grid)
+        core_row.addLayout(v_engine)
 
-        # Advanced Settings
-        config_layout.addWidget(self.create_separator())
+        v_lang = QVBoxLayout()
+        v_lang.addWidget(self._field_label("Target Languages (comma-separated)"))
+        self.lang_edit = QLineEdit("en")
+        self.lang_edit.setPlaceholderText("en, fr, de…")
+        v_lang.addWidget(self.lang_edit)
+        core_row.addLayout(v_lang, stretch=2)
 
-        # Translate API & Mode
-        trans_grid = QHBoxLayout()
-        
+        layout.addLayout(core_row)
+
+        # Translation row ─────────────────────────────────────────────────
+        trans_row = QHBoxLayout()
+        trans_row.setSpacing(12)
+
         v_api = QVBoxLayout()
+        v_api.addWidget(self._field_label("Translator Backend"))
         self.api_combo = QComboBox()
         self.api_combo.addItems(["deep-translator", "googletrans"])
-        v_api.addWidget(QLabel("Translator Backend"))
         v_api.addWidget(self.api_combo)
-        trans_grid.addLayout(v_api)
+        trans_row.addLayout(v_api)
 
         v_mode = QVBoxLayout()
+        v_mode.addWidget(self._field_label("Translate Mode"))
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["all", "non-target"])
-        v_mode.addWidget(QLabel("Translate Mode"))
         v_mode.addWidget(self.mode_combo)
-        trans_grid.addLayout(v_mode)
-        
-        config_layout.addLayout(trans_grid)
+        trans_row.addLayout(v_mode)
 
-        # Source Language & Max Duration
-        # Source Language & Max Duration
-        limit_grid = QHBoxLayout()
-        
+        layout.addLayout(trans_row)
+
+        # Limits row ──────────────────────────────────────────────────────
+        limits_row = QHBoxLayout()
+        limits_row.setSpacing(12)
+
         v_src = QVBoxLayout()
+        v_src.addWidget(self._field_label("Source Language"))
         self.src_lang_edit = QLineEdit()
         self.src_lang_edit.setPlaceholderText("Auto-detect")
-        v_src.addWidget(QLabel("Source Language (Override)"))
         v_src.addWidget(self.src_lang_edit)
-        limit_grid.addLayout(v_src)
-        limit_grid.setSpacing(20) # Spacing between Source Language and Max Duration
+        limits_row.addLayout(v_src)
 
         v_dur = QVBoxLayout()
+        v_dur.addWidget(self._field_label("Max Duration"))
         self.max_duration = QSpinBox()
         self.max_duration.setRange(0, 86400)
         self.max_duration.setValue(7200)
-        self.max_duration.setSuffix("s")
-        v_dur.addWidget(QLabel("Max Media Duration"))
+        self.max_duration.setSuffix(" s")
         v_dur.addWidget(self.max_duration)
-        limit_grid.addLayout(v_dur)
+        limits_row.addLayout(v_dur)
 
-        config_layout.addLayout(limit_grid)
-        config_layout.addSpacing(10) # Spacing before toggles
+        v_delay = QVBoxLayout()
+        v_delay.addWidget(self._field_label("Audio Delay"))
+        self.delay_spin = QSpinBox()
+        self.delay_spin.setRange(-10000, 10000)
+        self.delay_spin.setValue(0)
+        self.delay_spin.setSuffix(" ms")
+        v_delay.addWidget(self.delay_spin)
+        limits_row.addLayout(v_delay)
 
-        # Toggles Grid
-        toggles_grid = QHBoxLayout()
-        
-        v_toggles_l = QVBoxLayout()
+        layout.addLayout(limits_row)
+
+        layout.addWidget(self._make_separator())
+
+        # Toggles ─────────────────────────────────────────────────────────
+        toggles_row = QHBoxLayout()
+        toggles_row.setSpacing(16)
+
+        col_l = QVBoxLayout()
         self.vocal_check = QCheckBox("Vocal Isolation (Demucs)")
         self.vocal_check.setChecked(True)
         self.skip_orig_check = QCheckBox("Skip Original SRT")
-        v_toggles_l.addWidget(self.vocal_check)
-        v_toggles_l.addWidget(self.skip_orig_check)
-        
-        v_toggles_r = QVBoxLayout()
-        self.overwrite_check = QCheckBox("Overwrite Files")
+        col_l.addWidget(self.vocal_check)
+        col_l.addWidget(self.skip_orig_check)
+
+        col_r = QVBoxLayout()
+        self.overwrite_check = QCheckBox("Overwrite Existing Files")
         self.continue_err_check = QCheckBox("Continue on Error")
-        v_toggles_r.addWidget(self.overwrite_check)
-        v_toggles_r.addWidget(self.continue_err_check)
-        
-        toggles_grid.addLayout(v_toggles_l)
-        toggles_grid.addLayout(v_toggles_r)
-        config_layout.addLayout(toggles_grid)
+        col_r.addWidget(self.overwrite_check)
+        col_r.addWidget(self.continue_err_check)
 
-        # Start Button
-        self.start_btn = QPushButton("INITIATE PIPELINE")
+        toggles_row.addLayout(col_l)
+        toggles_row.addLayout(col_r)
+        layout.addLayout(toggles_row)
+
+        layout.addStretch()
+
+        # Start button ────────────────────────────────────────────────────
+        self.start_btn = QPushButton("▶  INITIATE PIPELINE")
         self.start_btn.setObjectName("PrimaryBtn")
-        self.start_btn.setFixedHeight(55)
+        self.start_btn.setFixedHeight(52)
+        self.start_btn.setCursor(Qt.PointingHandCursor)
         self.start_btn.clicked.connect(self.start_processing)
-        config_layout.addWidget(self.start_btn)
+        layout.addWidget(self.start_btn)
 
-        config_layout.addStretch()
-        content_layout.addWidget(config_scroll, 4)
+        return panel
 
-        # --- Monitor Column ---
-        monitor_frame = QFrame()
-        monitor_frame.setObjectName("MonitorPanel")
-        monitor_layout = QVBoxLayout(monitor_frame)
-        
-        monitor_title = QLabel("VAULT ACTIVITY MONITOR")
-        monitor_title.setObjectName("SectionTitleMonitor")
-        monitor_layout.addWidget(monitor_title)
+    def _build_monitor_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("MonitorPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
 
+        # Header row
+        monitor_row = QHBoxLayout()
+        title = QLabel("VAULT ACTIVITY MONITOR")
+        title.setObjectName("SectionTitleMonitor")
+        monitor_row.addWidget(title)
+        monitor_row.addStretch()
+
+        self.status_badge = QLabel("IDLE")
+        self.status_badge.setObjectName("TagBadge")
+        monitor_row.addWidget(self.status_badge)
+        layout.addLayout(monitor_row)
+
+        # Log area
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setObjectName("LogArea")
-        monitor_layout.addWidget(self.log_area)
+        layout.addWidget(self.log_area, stretch=1)
+
+        # Progress row
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(10)
+
+        self.progress_label = QLabel("Ready")
+        self.progress_label.setObjectName("StatusLabel")
+        self.progress_label.setFixedWidth(200)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedHeight(12)
-        monitor_layout.addWidget(self.progress_bar)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedHeight(22)
 
-        content_layout.addWidget(monitor_frame, 5)
-        main_layout.addLayout(content_layout)
+        progress_row.addWidget(self.progress_label)
+        progress_row.addWidget(self.progress_bar, stretch=1)
+        layout.addLayout(progress_row)
 
+        return panel
 
+    # ── Helpers ──────────────────────────────────────────────────────────────
 
         # --- Accessibility & Tooltips ---
         self.theme_combo.setToolTip("Select UI Theme")
@@ -294,14 +480,21 @@ class VaultWindow(QMainWindow):
         else:
             super().dropEvent(event)
 
-    def create_separator(self):
+    def _field_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("StatusLabel")
+        return lbl
+
+    def _make_separator(self) -> QFrame:
         line = QFrame()
+        line.setObjectName("Separator")
         line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
-        line.setStyleSheet(f"background-color: rgba(74, 84, 89, 0.1); max-height: 1px;")
+        line.setFixedHeight(1)
         return line
 
-    def change_theme(self, theme_name):
+    # ── Theme ─────────────────────────────────────────────────────────────────
+
+    def change_theme(self, theme_name: str):
         for t in self.themes:
             if t.name == theme_name:
                 self.current_theme = t
@@ -309,24 +502,52 @@ class VaultWindow(QMainWindow):
         self.apply_vault_styles()
 
     def apply_vault_styles(self):
-        self.setStyleSheet(self.exporter.generate_qss(self.current_theme))
-        self.title_label.setText(f"Media <span style='color: {self.current_theme.accent}'>Transcriber</span>")
-        # Update colors that need manual override if QSS doesn't catch them or for rich text
-        pass
+        t = self.current_theme
+        self.setStyleSheet(self.exporter.generate_qss(t))
+        self.title_label.setText(
+            f"<span style='font-weight:300'>Vault</span>"
+            f"<span style='color:{t.accent}; font-weight:600'> Video Enhancer</span>"
+        )
 
-    def browse_input(self):
-        path = QFileDialog.getOpenFileName(self, "Select Media", "", "Media Files (*.mp4 *.mkv *.avi *.mov *.flv *.webm *.mp3 *.wav *.m4a);;All Files (*)")[0]
+    # ── Actions ──────────────────────────────────────────────────────────────
+
+    def browse_input_file(self):
+        path = QFileDialog.getOpenFileName(
+            self, "Select Media File", "",
+            "Media Files (*.mp4 *.mkv *.avi *.mov *.flv *.webm *.mp3 *.wav *.m4a);;All Files (*)"
+        )[0]
         if path:
             self.input_edit.setText(path)
 
-    def log(self, message):
-        timestamp = time.strftime("%H:%M:%S")
-        self.log_area.append(f"<span style='color: #888888'>[{timestamp}]</span> {message}")
+    def browse_input_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Select Folder", "")
+        if path:
+            self.input_edit.setText(path)
+
+    def log(self, message: str):
+        t = self.current_theme
+        ts = time.strftime("%H:%M:%S")
+
+        # Color-code known message patterns
+        if any(k in message.lower() for k in ("error:", "failed", "traceback", "exception")):
+            color = t.error
+        elif any(k in message.lower() for k in ("success", "completed", "generated", "done")):
+            color = t.success
+        elif any(k in message.lower() for k in ("warning", "warn:", "skipping")):
+            color = t.warning
+        elif any(k in message.lower() for k in ("step ", "initiating", "extracting", "transcrib")):
+            color = t.accent
+        else:
+            color = t.text
+
+        ts_html = f"<span style='color:{t.muted}'>[{ts}]</span>"
+        msg_html = f"<span style='color:{color}'>{message}</span>"
+        self.log_area.append(f"{ts_html} {msg_html}")
 
     def start_processing(self):
-        input_path = self.input_edit.text()
+        input_path = self.input_edit.text().strip()
         if not input_path:
-            self.log("<span style='color: #e74c3c'>Error: No input path specified.</span>")
+            self.log(f"<span style='color:{self.current_theme.error}'>Error: No input path specified.</span>")
             return
 
         params = {
@@ -338,36 +559,73 @@ class VaultWindow(QMainWindow):
             "skip_vocal_isolation": not self.vocal_check.isChecked(),
             "skip_original": self.skip_orig_check.isChecked(),
             "max_duration": self.max_duration.value(),
+            "delay_ms": self.delay_spin.value(),
             "source_language": self.src_lang_edit.text().strip() or None,
             "overwrite": self.overwrite_check.isChecked(),
-            # "continue_on_error" is used in the script's loop, core.py handle single files. 
-            # If scan_dir was implemented in GUI, we'd use it there.
+            "continue_on_error": self.continue_err_check.isChecked(),
         }
 
         self.start_btn.setEnabled(False)
-        self.progress_bar.setValue(10)
-        self.log(f"Initiating Vault Pipeline for: {os.path.basename(input_path)}")
-        
+        self.status_badge.setText("RUNNING")
+        self.status_badge.setStyleSheet(
+            f"background-color: {self.current_theme.success}; "
+            f"color: {self.current_theme.text_inverse}; "
+            "border-radius: 4px; padding: 1px 8px; font-size: 10px; font-weight: 700;"
+        )
+        self.progress_bar.setValue(5)
+        self.progress_label.setText("Initializing…")
+        self.log(f"Pipeline started — {os.path.basename(input_path)}")
+
         self.worker = TranscriptionWorker(params)
-        self.worker.progress.connect(self.log)
+        self.worker.progress.connect(self._on_progress_text)
+        self.worker.progress_percent.connect(self._on_progress_pct)
         self.worker.error.connect(self.on_error)
         self.worker.finished.connect(self.on_finished)
         self.worker.start()
 
-    def on_error(self, message):
-        self.log(f"<span style='color: #e74c3c'>ERROR: {message}</span>")
+    def _on_progress_text(self, text: str):
+        self.progress_label.setText(text[:40] + "…" if len(text) > 40 else text)
+        self.log(text)
+
+    def _on_progress_pct(self, pct: int):
+        self.progress_bar.setValue(pct)
+
+    def on_error(self, message: str):
+        self.log(f"<span style='color:{self.current_theme.error}'>ERROR: {message}</span>")
+        self.status_badge.setText("FAILED")
+        self.status_badge.setStyleSheet(
+            f"background-color: {self.current_theme.error}; "
+            f"color: {self.current_theme.text_inverse}; "
+            "border-radius: 4px; padding: 1px 8px; font-size: 10px; font-weight: 700;"
+        )
         self.start_btn.setEnabled(True)
         self.progress_bar.setValue(0)
+        self.progress_label.setText("Error — see log")
 
-    def on_finished(self, outputs):
-        self.log(f"<span style='color: #2ecc71'>SUCCESS: Generated {len(outputs)} files.</span>")
+    def on_finished(self, outputs: list):
+        t = self.current_theme
+        self.log(
+            f"<span style='color:{t.success}'>✓ Pipeline complete — "
+            f"{len(outputs)} file(s) generated.</span>"
+        )
         for p in outputs:
-            self.log(f" &nbsp;&nbsp;• {os.path.basename(p)}")
+            self.log(f"<span style='color:{t.text_muted}'>  • {os.path.basename(p)}</span>")
+
+        self.status_badge.setText("DONE")
+        self.status_badge.setStyleSheet(
+            f"background-color: {t.accent}; "
+            f"color: {t.text_inverse}; "
+            "border-radius: 4px; padding: 1px 8px; font-size: 10px; font-weight: 700;"
+        )
         self.start_btn.setEnabled(True)
         self.progress_bar.setValue(100)
+        self.progress_label.setText("Complete")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setFont(QFont("Segoe UI", 10))
     window = VaultWindow()
     window.show()
     sys.exit(app.exec())
