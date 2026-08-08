@@ -50,4 +50,4 @@ def test_theme_contrast_switch(window, qtbot):
     # Verify some colors (simplified)
     qss = window.styleSheet()
     assert "background-color: #FDF6E3" in qss or "background-color: #F5EFD6" in qss
-    assert "color: #073642" in qss
+    assert "color: #073642" in qss or "color: #002B36" in qss

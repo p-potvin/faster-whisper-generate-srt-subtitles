@@ -1,6 +1,16 @@
 import unittest
 import asyncio
+import sys
 from unittest.mock import MagicMock, patch
+
+try:
+    import argostranslate
+except ImportError:
+    argos_mock = MagicMock()
+    sys.modules['argostranslate'] = argos_mock
+    sys.modules['argostranslate.package'] = argos_mock.package
+    sys.modules['argostranslate.translate'] = argos_mock.translate
+
 from vaultwares_media_processing import translation
 
 class TestTranslation(unittest.TestCase):
