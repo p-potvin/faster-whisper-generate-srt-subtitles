@@ -20,18 +20,30 @@ class DummyTqdm:
     def set_description(self, *args, **kwargs): pass
     def set_postfix(self, *args, **kwargs): pass
 tqdm.tqdm = DummyTqdm
-from vault_enhancer import utils
-from vault_enhancer import translation
-from vault_enhancer import media
+from vaultwares_media_processing import utils
+from vaultwares_media_processing import translation
+from vaultwares_media_processing import media
 
 _PARAKEET_MODEL = None
+_WHISPER_MODEL = None
 
 def get_parakeet_model():
     global _PARAKEET_MODEL
     if _PARAKEET_MODEL is None:
-        from vault_enhancer.parakeet_wrapper import ParakeetV3Wrapper
+        from vaultwares_media_processing.parakeet_wrapper import ParakeetV3Wrapper
         _PARAKEET_MODEL = ParakeetV3Wrapper()
     return _PARAKEET_MODEL
+
+def get_whisper_model():
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        from faster_whisper import WhisperModel
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_type = "float16" if device == "cuda" else "int8"
+        _WHISPER_MODEL = WhisperModel("large-v3", device=device, compute_type=compute_type)
+    return _WHISPER_MODEL
+
 
 def transcribe_video(
     input_file,
@@ -47,7 +59,9 @@ def transcribe_video(
     source_language = "en",
     delay_ms = 0,
     max_duration = 7200,
-    progress_callback = None
+    engine = "parakeet",
+    progress_callback = None,
+    **kwargs
 ):
     start_total = time.time()
     # Validate input file
@@ -87,7 +101,10 @@ def transcribe_video(
         progress_callback("Step 0: Loading ML models into VRAM (this may take a minute)...", 2)
 
     start_load = time.time()
-    model = get_parakeet_model()
+    if str(engine).lower() == "whisper":
+        model = get_whisper_model()
+    else:
+        model = get_parakeet_model()
 
     # Ensure context is fully initialized before starting subprocesses
     try:
@@ -117,7 +134,7 @@ def transcribe_video(
             print(f"Warning: Audio fix failed: {e}. Falling back to original video.")
             transcription_file = input_file
 
-    print(f"--- Step 2: Transcribing Video (Parakeet) ---")
+    print(f"--- Step 2: Transcribing Video ({engine}) ---")
     # Extract WAV for reliable ASR loading (bypasses torchaudio FFmpeg extension bugs)
     if progress_callback is not None:
         progress_callback("Extracting audio for ASR...", 48)
@@ -128,10 +145,14 @@ def transcribe_video(
     if progress_callback is not None:
         progress_callback("Step 2: Transcribing Audio...", 50)
         
-    all_segments = model.transcribe_file(
-        asr_wav_file,
-        language=source_language
-    )
+    if str(engine).lower() == "whisper":
+        segments_raw, _ = model.transcribe(asr_wav_file, language=source_language)
+        all_segments = list(segments_raw)
+    else:
+        all_segments = model.transcribe_file(
+            asr_wav_file,
+            language=source_language
+        )
     
     # Cleanup ASR temp file
     if os.path.exists(asr_wav_file):
@@ -191,14 +212,22 @@ def transcribe_video(
             
             outputs_to_generate[srt_lang_path] = translated_texts
 
-        if not outputs_to_generate:
-            print("No new files to generate.")
-            return []
-        
-        for path, texts_to_write in outputs_to_generate.items():
-            utils.write_srt(path, all_segments, texts_to_write)
-            output_paths.append(path)
-        
+    if not outputs_to_generate:
+        print("No new files to generate.")
+        return []
+    
+    for path, texts_to_write in outputs_to_generate.items():
+        utils.write_srt(path, all_segments, texts_to_write)
+        output_paths.append(path)
+    
     print(f"\n--- Processing Finished ---")
     print(f"\nTotal time elapsed: {time.time() - start_total:.2f}s")
     return output_paths
+
+
+def stylize_video(input_file, prompt, negative_prompt="", progress_callback=None):
+    from vaultwares_media_processing.stream_wrapper import StreamDiffuser
+    output_file = os.path.splitext(input_file)[0] + "_stylized.mp4"
+    diffuser = StreamDiffuser()
+    return [diffuser.stylize_video(input_file, output_file, prompt, negative_prompt, progress_callback)]
+

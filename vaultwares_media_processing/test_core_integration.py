@@ -1,17 +1,17 @@
 import unittest
 import os
 from unittest.mock import patch, MagicMock
-from vault_enhancer import core
+from vaultwares_media_processing import core
 
 class TestCoreIntegration(unittest.TestCase):
-    @patch('vault_enhancer.media.get_audio_duration_seconds')
-    @patch('vault_enhancer.media.srt_files_exist')
+    @patch('vaultwares_media_processing.media.get_audio_duration_seconds')
+    @patch('vaultwares_media_processing.media.srt_files_exist')
     @patch('os.path.isfile')
-    @patch('vault_enhancer.core.get_parakeet_model')
-    @patch('vault_enhancer.translation.translate_segments')
-    @patch('vault_enhancer.utils.write_srt')
-    @patch('vault_enhancer.media.fix_audio_and_reencode')
-    @patch('vault_enhancer.media.extract_wav_for_asr')
+    @patch('vaultwares_media_processing.core.get_parakeet_model')
+    @patch('vaultwares_media_processing.translation.translate_segments')
+    @patch('vaultwares_media_processing.utils.write_srt')
+    @patch('vaultwares_media_processing.media.fix_audio_and_reencode')
+    @patch('vaultwares_media_processing.media.extract_wav_for_asr')
     @patch('os.remove')
     @patch('os.path.exists')
     @patch('time.sleep') # Mock sleep to avoid timeouts
@@ -65,6 +65,43 @@ class TestCoreIntegration(unittest.TestCase):
         mock_translate.assert_called_once()
         # Verify files were written
         self.assertEqual(mock_write.call_count, 3)
+
+    @patch('vaultwares_media_processing.media.get_audio_duration_seconds')
+    @patch('vaultwares_media_processing.media.srt_files_exist')
+    @patch('os.path.isfile')
+    @patch('vaultwares_media_processing.core.get_parakeet_model')
+    @patch('vaultwares_media_processing.translation.translate_segments')
+    @patch('vaultwares_media_processing.utils.write_srt')
+    @patch('vaultwares_media_processing.media.fix_audio_and_reencode')
+    @patch('vaultwares_media_processing.media.extract_wav_for_asr')
+    @patch('os.remove')
+    @patch('os.path.exists')
+    @patch('time.sleep')
+    def test_transcribe_video_with_engine_param(self, mock_sleep, mock_exists, mock_remove, mock_extract, mock_fix, mock_write, mock_translate, mock_get_model, mock_isfile, mock_srt_exist, mock_get_duration):
+        mock_isfile.return_value = True
+        mock_srt_exist.return_value = False
+        mock_get_duration.return_value = 5.0
+        mock_fix.return_value = "fixed_audio.wav"
+        mock_extract.return_value = "asr_audio.wav"
+        mock_exists.return_value = True
+
+        mock_model = MagicMock()
+        mock_segment = MagicMock(start=0.0, end=1.0, text="Test segment")
+        mock_model.transcribe_file.return_value = [mock_segment]
+        mock_get_model.return_value = mock_model
+
+        async def async_translate(*args, **kwargs):
+            return ["Test segment"]
+        mock_translate.side_effect = async_translate
+
+        # Pass engine="parakeet" explicitly
+        paths = core.transcribe_video(
+            input_file="dummy.mp4",
+            engine="parakeet",
+            skip_vocal_isolation=True
+        )
+        self.assertTrue(len(paths) > 0)
+
 
 if __name__ == '__main__':
     unittest.main()

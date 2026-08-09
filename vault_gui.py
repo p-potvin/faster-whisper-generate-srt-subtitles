@@ -11,11 +11,12 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtGui import QPixmap, QIcon, QFont, QColor, QPalette,  QKeySequence, QShortcut, QTextCursor
 
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "vault-themes"))
+themes_dir = os.path.join(os.path.dirname(__file__), "vaultwares-themes")
+
+sys.path.insert(0, themes_dir)
 from qt_exporter import QtThemeExporter
 
-from vault_enhancer import core, utils, media
+from vaultwares_media_processing import core, utils, media
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,7 +79,15 @@ class TranscriptionWorker(QThread):
                 current_params.pop('continue_on_error', None)
                 
                 try:
-                    output_paths = core.transcribe_video(**current_params)
+                    if "Stylization" in current_params.get("task_mode", ""):
+                        output_paths = core.stylize_video(
+                            input_file=current_params["input_file"], 
+                            prompt=current_params.get("prompt", ""), 
+                            negative_prompt=current_params.get("neg_prompt", ""),
+                            progress_callback=current_params.get("progress_callback")
+                        )
+                    else:
+                        output_paths = core.transcribe_video(**current_params)
                     all_outputs.extend(output_paths)
                 except Exception as e:
                     if self.params.get('continue_on_error', False):
@@ -244,13 +253,26 @@ UI_STRINGS = {
     }
 }
 
+class ThemeComboBox(QComboBox):
+    def setCurrentText(self, text: str):
+        idx = self.findText(text)
+        if idx != -1:
+            self.setCurrentIndex(idx)
+            return
+        for i in range(self.count()):
+            if text.lower() in self.itemText(i).lower():
+                self.setCurrentIndex(i)
+                return
+        super().setCurrentText(text)
+
+
 class VaultWindow(QMainWindow):
     log_signal = Signal(str)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Vault Video Enhancer")
-        self.setMinimumSize(1100, 700)
+        self.setMinimumSize(400, 300)
         self.setWindowState(Qt.WindowMaximized)
 
         self.exporter = QtThemeExporter()
@@ -272,8 +294,13 @@ class VaultWindow(QMainWindow):
     # ── UI construction ──────────────────────────────────────────────────────
 
     def init_ui(self):
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.setCentralWidget(self.scroll_area)
+
         root = QWidget()
-        self.setCentralWidget(root)
+        self.scroll_area.setWidget(root)
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(16, 10, 16, 10)
         root_layout.setSpacing(10)
@@ -284,8 +311,10 @@ class VaultWindow(QMainWindow):
 
         # ── Main split (config | monitor) ────────────────────────────────
         self.split = QSplitter(Qt.Horizontal)
-        self.split.addWidget(self._build_config_panel())
-        self.split.addWidget(self._build_monitor_panel())
+        self.config_panel = self._build_config_panel()
+        self.monitor_panel = self._build_monitor_panel()
+        self.split.addWidget(self.config_panel)
+        self.split.addWidget(self.monitor_panel)
         self.split.setStretchFactor(0, 4)
         self.split.setStretchFactor(1, 6)
         
@@ -309,7 +338,9 @@ class VaultWindow(QMainWindow):
 
         # Logo
         logo_label = QLabel()
-        logo_path = "vault-themes/assets/logos/vaultwares-minimal-gold-filled.png"
+        logo_path = os.path.join(themes_dir, "assets", "logos", "vaultwares-minimal-gold-filled.png")
+        if not os.path.exists(logo_path):
+            logo_path = "vault-themes/assets/logos/vaultwares-minimal-gold-filled.png"
         logo_pix = QPixmap(logo_path)
         if not logo_pix.isNull():
             logo_label.setPixmap(logo_pix.scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -342,7 +373,7 @@ class VaultWindow(QMainWindow):
         # Theme selector
         self.theme_label = QLabel(UI_STRINGS[self.current_lang]["theme"])
         self.theme_label.setObjectName("StatusLabel")
-        self.theme_combo = QComboBox()
+        self.theme_combo = ThemeComboBox()
         self.theme_combo.setFixedWidth(220)
         for t in self.themes:
             self.theme_combo.addItem(t.name)
@@ -360,14 +391,15 @@ class VaultWindow(QMainWindow):
         except Exception:
             pass
 
-        default_theme_id = "golden-slate" if is_dark else "codex-solar-light-revisited"
+        default_theme_name = "Golden Slate" if is_dark else "Codex Solar Light"
         for i, t in enumerate(self.themes):
-            if t.id == default_theme_id:
+            if default_theme_name.lower() in t.name.lower():
                 self.theme_combo.setCurrentIndex(i)
                 self.current_theme = t
                 break
 
         self.theme_combo.currentTextChanged.connect(self.change_theme)
+        self.header_mode_combo = self.theme_combo
 
         layout.addWidget(logo_label)
         layout.addSpacing(10)
@@ -387,6 +419,7 @@ class VaultWindow(QMainWindow):
     def _build_config_panel(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("ConfigPanel")
+        panel.setMinimumHeight(400)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(14)
@@ -420,6 +453,41 @@ class VaultWindow(QMainWindow):
         layout.addLayout(path_row)
 
         layout.addWidget(self._make_separator())
+
+        # Task Mode ────────────────────────────────────────────────────────
+        self.task_mode_label = self._field_label("Task Mode")
+        layout.addWidget(self.task_mode_label)
+        self.task_mode_combo = QComboBox()
+        self.task_mode_combo.addItems(["Transcription (Parakeet)", "Video Stylization (StreamDiffusion)"])
+        self.task_mode_combo.currentTextChanged.connect(self._on_task_mode_changed)
+        layout.addWidget(self.task_mode_combo)
+
+        layout.addWidget(self._make_separator())
+
+        # Stylization Row ──────────────────────────────────────────────────
+        self.stylize_widget = QWidget()
+        stylize_layout = QVBoxLayout(self.stylize_widget)
+        stylize_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.prompt_label = self._field_label("Stylization Prompt")
+        self.prompt_edit = QLineEdit()
+        self.prompt_edit.setPlaceholderText("e.g. 1girl, cyberpunk, masterpiece, 4k...")
+        stylize_layout.addWidget(self.prompt_label)
+        stylize_layout.addWidget(self.prompt_edit)
+
+        self.neg_prompt_label = self._field_label("Negative Prompt")
+        self.neg_prompt_edit = QLineEdit()
+        self.neg_prompt_edit.setPlaceholderText("e.g. low quality, bad anatomy...")
+        stylize_layout.addWidget(self.neg_prompt_label)
+        stylize_layout.addWidget(self.neg_prompt_edit)
+
+        layout.addWidget(self.stylize_widget)
+        self.stylize_widget.setVisible(False)  # Default hidden
+
+        # Transcription Container (Wrap the rest)
+        self.transcription_widget = QWidget()
+        transLayout = QVBoxLayout(self.transcription_widget)
+        transLayout.setContentsMargins(0, 0, 0, 0)
 
         # Core options row ────────────────────────────────────────────────
         core_row = QHBoxLayout()
@@ -523,8 +591,9 @@ class VaultWindow(QMainWindow):
 
         toggles_row.addLayout(col_l)
         toggles_row.addLayout(col_r)
-        layout.addLayout(toggles_row)
+        transLayout.addLayout(toggles_row)
 
+        layout.addWidget(self.transcription_widget)
         layout.addStretch()
 
         # Start button ────────────────────────────────────────────────────
@@ -540,6 +609,7 @@ class VaultWindow(QMainWindow):
     def _build_monitor_panel(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("MonitorPanel")
+        panel.setMinimumHeight(300)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
@@ -613,12 +683,14 @@ class VaultWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if not hasattr(self, 'config_panel') or not hasattr(self, 'monitor_panel') or not hasattr(self, 'split'):
+            return
         if self.width() < 800:
             if self.split.orientation() != Qt.Vertical:
                 self.split.setOrientation(Qt.Vertical)
-                # Put monitor on top
-                self.split.insertWidget(0, self.monitor_panel)
-                self.split.insertWidget(1, self.config_panel)
+                # Config on top (index 0), monitor on bottom (index 1)
+                self.split.insertWidget(0, self.config_panel)
+                self.split.insertWidget(1, self.monitor_panel)
                 
             self.split.setMinimumHeight(self.monitor_panel.minimumHeight() + self.config_panel.minimumHeight() + 10)
         else:
@@ -754,10 +826,12 @@ class VaultWindow(QMainWindow):
 
 
     def toggle_mode(self):
-        current_id = self.current_theme.id
-        new_id = "codex-solar-light-revisited" if current_id == "golden-slate" else "golden-slate"
+        curr_name = getattr(self.current_theme, "name", "")
         for i, t in enumerate(self.themes):
-            if t.id == new_id:
+            if "Golden" in curr_name and ("Light" in t.name or "Solar" in t.name):
+                self.theme_combo.setCurrentIndex(i)
+                break
+            elif ("Light" in curr_name or "Solar" in curr_name) and ("Golden" in t.name or "Slate" in t.name):
                 self.theme_combo.setCurrentIndex(i)
                 break
 
@@ -832,6 +906,11 @@ class VaultWindow(QMainWindow):
         cursor.movePosition(QTextCursor.End)
         self.log_area.setTextCursor(cursor)
 
+    def _on_task_mode_changed(self, text):
+        is_stylize = "Stylization" in text
+        self.stylize_widget.setVisible(is_stylize)
+        self.transcription_widget.setVisible(not is_stylize)
+
     def start_processing(self):
         input_path = self.input_edit.text().strip()
         if not input_path:
@@ -842,6 +921,9 @@ class VaultWindow(QMainWindow):
         max_dur = duration_val * 60 if duration_val > 0 else None
 
         params = {
+            "task_mode": self.task_mode_combo.currentText(),
+            "prompt": self.prompt_edit.text(),
+            "neg_prompt": self.neg_prompt_edit.text(),
             "input_file": input_path,
             "languages": [l.strip() for l in self.lang_edit.text().split(",") if l.strip()],
             "engine": self.engine_combo.currentText(),

@@ -1,6 +1,8 @@
 import logging
 import uuid
 import sys
+import os
+import shutil
 
 _LOGGER = None
 _CORRELATION_ID = None
@@ -64,3 +66,22 @@ def write_srt(output_path, segments, texts):
             segment_id = segment.id
             line_out = f"{segment_id}\n{start_time} --> {end_time}\n{text.lstrip()}\n\n"
             output_file.write(line_out)
+
+
+def robust_rmtree(path, retries=5, delay=0.2):
+    """Remove a directory tree with retries on Windows PermissionError."""
+    if not os.path.exists(path):
+        return
+    for i in range(retries):
+        try:
+            shutil.rmtree(path)
+            return
+        except PermissionError:
+            if i == retries - 1:
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                time.sleep(delay)
+        except Exception:
+            shutil.rmtree(path, ignore_errors=True)
+            return
+

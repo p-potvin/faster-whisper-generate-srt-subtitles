@@ -1,7 +1,7 @@
 import unittest
 import os
 import shutil
-from vault_enhancer import utils
+from vaultwares_media_processing import utils
 
 class TestUtils(unittest.TestCase):
     def test_format_time(self):
