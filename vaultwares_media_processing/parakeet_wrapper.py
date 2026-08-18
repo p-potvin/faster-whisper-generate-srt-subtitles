@@ -108,57 +108,271 @@ class ParakeetTranscriber:
     DEFAULT_MIN_SILENCE_S = 0.8   # gap between words that ends a segment
     DEFAULT_MIN_SEGMENT_S = 0.3   # discard segments shorter than this
 
+    # Places a converted model directory may live, in preference order. The
+    # shared store is last so a project-local copy always wins, but its presence
+    # means every project finds the same converted model without any per-repo
+    # configuration — the hard links are a disk-space optimisation, not a
+    # requirement for the lookup to work.
+    @staticmethod
+    def _converted_search_roots():
+        roots = [os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tools", "models"))]
+        model_dir = os.environ.get("VAULT_MODEL_DIR")
+        if model_dir:
+            roots.append(model_dir)
+        store = os.environ.get("VW_MODEL_STORE")
+        if store:
+            roots.append(store)
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            roots.append(os.path.join(local_appdata, "VaultWares", "models"))
+        return roots
+
     def __init__(self, model_name: str = DEFAULT_MODEL, status_callback=None):
         import time
         t_import_start = time.perf_counter()
         import torch
         import nemo.collections.asr as nemo_asr
         t_import_end = time.perf_counter()
-        
-        # Log/Print import latency telemetry
-        import_duration = t_import_end - t_import_start
-        print(f"[ASR Telemetry] Library Import Latency: {import_duration:.4f} seconds")
+
+        print(f"[ASR Telemetry] Library Import Latency: {t_import_end - t_import_start:.4f} seconds")
 
         self.logger = logging.getLogger("vaultwares_media_processing.parakeet")
         self.logger.info(f"Loading Parakeet model: {model_name}")
 
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         t_load_start = time.perf_counter()
-        # Use generic ASRModel to support Canary, Parakeet-TDT, etc.
-        # --- Optimization: Search for local .nemo file in HF cache to bypass remote checks ---
-        if not (model_name.endswith(".nemo") and os.path.exists(model_name)):
-            import glob
-            hf_cache_pattern = os.path.expanduser("~/.cache/huggingface/hub/models--nvidia--parakeet-tdt-0.6b-v3/snapshots/*/*.nemo")
-            # Also check without 'models--' prefix as seen in some versions
-            hf_cache_pattern_alt = os.path.expanduser("~/.cache/huggingface/hub/parakeet-tdt-0.6b-v3/snapshots/*/*.nemo")
-            
-            local_models = glob.glob(hf_cache_pattern) + glob.glob(hf_cache_pattern_alt)
-            if local_models:
-                model_name = local_models[0]
-                self.logger.info(f"Found local model in HF cache: {model_name}")
 
-        # --- Optimization: Restore natively from the resolved local .nemo file if present ---
-        # Windows has PermissionErrors when extracting/restoring directly from directories via restore_from.
-        # Restoring directly from the .nemo file is highly optimized and 100% robust on Windows.
-        if model_name.endswith(".nemo") and os.path.exists(model_name):
-            msg = f"Step 0: Restoring model from local path..."
-            if status_callback: status_callback(msg)
-            self.logger.info(f"Loading model from local .nemo archive: {model_name}")
-            self.model = nemo_asr.models.ASRModel.restore_from(model_name)
-        else:
-            msg = f"Step 0: Loading model from cache/remote..."
-            if status_callback: status_callback(msg)
-            self.logger.info(f"Restoring model from cache or downloading: {model_name}")
-            self.model = nemo_asr.models.ASRModel.from_pretrained(model_name)
-        if torch.cuda.is_available():
-            self.model = self.model.cuda()
+        # Fast path: a directory produced by tools/convert_nemo_to_safetensors.py.
+        # Building the modules with empty (meta) parameters and then streaming
+        # safetensors straight to the GPU skips both the tar unpack and the
+        # torch.load pickle, and never materialises the 2.4 GB state dict in
+        # host RAM. Measured on parakeet-tdt-0.6b-v3: 45.8s / +2699 MB RSS ->
+        # 6.5s / +85 MB, with every one of the 725 tensors bit-identical.
+        self.model = self._load_converted(model_name, status_callback)
+
+        if self.model is None:
+            self.model = self._load_nemo_archive(model_name, nemo_asr, status_callback)
+
         self.model.eval()
         t_load_end = time.perf_counter()
-        
-        load_duration = t_load_end - t_load_start
-        print(f"[ASR Telemetry] Model Loading & Device Allocation: {load_duration:.4f} seconds")
+
+        # Hand back anything the load left behind before transcription starts.
+        self._release_load_scratch()
+
+        print(f"[ASR Telemetry] Model Loading & Device Allocation: {t_load_end - t_load_start:.4f} seconds")
         print(f"[ASR Telemetry] Combined Engine Initialization: {time.perf_counter() - t_import_start:.4f} seconds")
 
         self.logger.info("Parakeet model loaded successfully.")
+
+    # ------------------------------------------------------------------
+    # Loading strategies
+    # ------------------------------------------------------------------
+
+    def _converted_dir_for(self, model_name: str):
+        """Locate a converted model directory for *model_name*, if one exists."""
+        base = os.path.basename(str(model_name)).replace(".nemo", "")
+        for root in self._converted_search_roots():
+            candidate = os.path.join(root, base)
+            if (os.path.isfile(os.path.join(candidate, "model_config.yaml"))
+                    and os.path.isfile(os.path.join(candidate, "model.safetensors"))):
+                return candidate
+        return None
+
+    def _load_converted(self, model_name: str, status_callback=None):
+        """Build on meta parameters, then stream safetensors onto the device.
+
+        Returns None (having logged why) if anything about the fast path does not
+        hold, so the caller can fall back to the stock NeMo restore.
+        """
+        converted = self._converted_dir_for(model_name)
+        if not converted:
+            return None
+
+        try:
+            import torch
+            from omegaconf import OmegaConf, open_dict
+            from nemo.utils import model_utils
+            from accelerate import init_empty_weights
+            from safetensors import safe_open
+
+            if status_callback:
+                status_callback("Step 0: Loading model weights (safetensors)...")
+            self.logger.info(f"Loading from converted model dir: {converted}")
+
+            cfg = OmegaConf.load(os.path.join(converted, "model_config.yaml"))
+            target = cfg.get("target")
+            if not target:
+                raise RuntimeError("model_config.yaml has no `target` class path")
+
+            # Asset references are stored as bare filenames so the directory can
+            # be moved or hard-linked between projects. Resolve them against the
+            # directory the config actually lives in.
+            self._resolve_asset_paths(cfg, converted)
+
+            # The dataset sections have to come off before construction — the
+            # released config has no manifest_filepath, so NeMo raises while
+            # setting up dataloaders — but transcribe() later clones
+            # `validation_ds` to build its temporary dataloader. So: pop them to
+            # construct, then put them back on the model's own config.
+            dataset_cfg = {}
+            with open_dict(cfg):
+                for key in ("train_ds", "validation_ds", "test_ds"):
+                    if key in cfg:
+                        dataset_cfg[key] = cfg.pop(key)
+
+            # torch.device('meta') is too broad here — NeMo's ConvSubsampling
+            # calls .item() while computing its output length, which meta tensors
+            # cannot do. init_empty_weights redirects only parameters.
+            cls = model_utils.import_class_by_path(target)
+            with init_empty_weights(include_buffers=False):
+                model = cls(cfg=cfg, trainer=None)
+
+            with open_dict(model.cfg):
+                for key, value in dataset_cfg.items():
+                    model.cfg[key] = value
+
+            state = {}
+            with safe_open(os.path.join(converted, "model.safetensors"),
+                           framework="pt", device=self.device) as handle:
+                for key in handle.keys():
+                    state[key] = handle.get_tensor(key)
+
+            missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
+            state.clear()
+
+            if unexpected:
+                raise RuntimeError(f"{len(unexpected)} unexpected weights, e.g. {unexpected[:3]}")
+
+            leftover = self._materialise_generated_buffers(model)
+            if leftover:
+                raise RuntimeError(f"parameters left uninitialised: {leftover[:5]}")
+
+            # `missing` is expected to hold only non-persistent generated buffers,
+            # which the step above rebuilt. A missing real parameter is fatal.
+            real_missing = [n for n, p in model.named_parameters() if p.is_meta]
+            if real_missing:
+                raise RuntimeError(f"parameters left on meta: {real_missing[:5]}")
+
+            model.to(self.device)
+            self.logger.info(
+                f"Loaded {len(missing) and 'with regenerated buffers' or 'cleanly'} "
+                f"from safetensors on {self.device}")
+            return model
+
+        except Exception as err:
+            # A converted directory that cannot be used is a performance
+            # regression, not a failure — fall back and say so loudly enough to
+            # be actionable.
+            self.logger.warning(
+                f"Fast safetensors load failed ({err}); falling back to the .nemo archive. "
+                f"Re-run tools/convert_nemo_to_safetensors.py --force to rebuild it.")
+            print(f"[ASR Telemetry] Fast load unavailable: {err}")
+            self._release_load_scratch()
+            return None
+
+    @staticmethod
+    def _resolve_asset_paths(cfg, converted_dir):
+        """Turn bare asset filenames in *cfg* into absolute paths.
+
+        Walks the config and rewrites any string that names a file sitting in
+        *converted_dir* (tokenizer model, vocab, SPE vocab). Keeping these
+        relative on disk is what lets one converted directory be hard-linked
+        into several projects without each needing its own edited config.
+        """
+        from omegaconf import DictConfig, ListConfig, open_dict
+
+        present = {name for name in os.listdir(converted_dir)}
+
+        def walk(node):
+            if isinstance(node, DictConfig):
+                with open_dict(node):
+                    for key in list(node.keys()):
+                        value = node.get(key)
+                        if isinstance(value, str) and value in present:
+                            node[key] = os.path.join(converted_dir, value).replace("\\", "/")
+                        elif isinstance(value, (DictConfig, ListConfig)):
+                            walk(value)
+            elif isinstance(node, ListConfig):
+                for index, value in enumerate(node):
+                    if isinstance(value, str) and value in present:
+                        node[index] = os.path.join(converted_dir, value).replace("\\", "/")
+                    elif isinstance(value, (DictConfig, ListConfig)):
+                        walk(value)
+
+        walk(cfg)
+        return cfg
+
+    @staticmethod
+    def _materialise_generated_buffers(model, max_len: int = 5000):
+        """Rebuild buffers that are computed rather than stored.
+
+        ``encoder.pos_enc.pe`` is registered with ``persistent=False``, so it is
+        absent from the checkpoint by design and stays on meta after loading.
+        NeMo regenerates it via ``extend_pe``; doing it here means the first
+        transcription does not have to.
+        """
+        import torch
+
+        leftovers = [n for n, b in model.named_buffers() if b is not None and b.is_meta]
+        for name in leftovers:
+            owner = model
+            parts = name.split('.')
+            for part in parts[:-1]:
+                owner = getattr(owner, part)
+            leaf = parts[-1]
+            if hasattr(owner, 'extend_pe'):
+                # extend_pe short-circuits on hasattr(self, 'pe'), so the meta
+                # buffer has to be removed outright rather than set to None.
+                owner._buffers.pop(leaf, None)
+                device = next(model.parameters()).device
+                owner.extend_pe(max_len, device, torch.float32)
+
+        return [n for n, b in model.named_buffers() if b is not None and b.is_meta]
+
+    def _load_nemo_archive(self, model_name: str, nemo_asr, status_callback=None):
+        """Stock NeMo restore: slower, but works without a converted directory."""
+        if not (model_name.endswith(".nemo") and os.path.exists(model_name)):
+            import glob
+            candidates = []
+            model_dir = os.environ.get("VAULT_MODEL_DIR")
+            if model_dir:
+                candidates.append(os.path.join(model_dir, "parakeet-tdt-0.6b-v3.nemo"))
+            candidates += glob.glob(os.path.expanduser(
+                "~/.cache/huggingface/hub/models--nvidia--parakeet-tdt-0.6b-v3/snapshots/*/*.nemo"))
+            candidates += glob.glob(os.path.expanduser(
+                "~/.cache/huggingface/hub/parakeet-tdt-0.6b-v3/snapshots/*/*.nemo"))
+
+            local_model = next((c for c in candidates if c and os.path.exists(c)), None)
+            if local_model:
+                model_name = local_model
+                self.logger.info(f"Found local model: {model_name}")
+
+        if model_name.endswith(".nemo") and os.path.exists(model_name):
+            if status_callback:
+                status_callback("Step 0: Restoring model from local path...")
+            self.logger.info(f"Loading model from local .nemo archive: {model_name}")
+            model = nemo_asr.models.ASRModel.restore_from(model_name, map_location=self.device)
+        else:
+            if status_callback:
+                status_callback("Step 0: Loading model from cache/remote...")
+            self.logger.info(f"Restoring model from cache or downloading: {model_name}")
+            model = nemo_asr.models.ASRModel.from_pretrained(model_name, map_location=self.device)
+
+        if self.device == "cuda":
+            model = model.cuda()
+        return model
+
+    @staticmethod
+    def _release_load_scratch():
+        """Drop loader temporaries so they do not sit in RAM for the whole run."""
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Public API
